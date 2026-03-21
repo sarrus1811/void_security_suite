@@ -197,9 +197,9 @@ install_forensics(){
   # Create Shortcuts
   echo "Creating Launcher"
   cat <<EOF > "$HOME/.local/bin/autopsy"
-#!/bin/bash
-cd $INSTALL_DIR/autopsy-4.22.1 && ./bin/autopsy
-EOF
+  #!/bin/bash
+  cd $INSTALL_DIR/autopsy-4.22.1 && ./bin/autopsy
+  EOF
 
   chmod +x "$HOME/.local/bin/autopsy"
   echo "Setup Complete! Launch by typing 'autopsy' in your terminal."
