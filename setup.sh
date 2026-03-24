@@ -1,4 +1,4 @@
-!/usr/bin/env bash
+#!/usr/bin/env bash
 
 # if [ "$EUID" -ne 0 ]; then
 #   echo "Please run as root (sudo)"
@@ -50,7 +50,7 @@ install_mise() {
 
 install_autopsy(){
   echo "Installing Autopsy..."
-  sudo xbps-install -S sleuthkit openjdk17-jre testdisk afflib-devel libewf-devel wget unzip -y
+  sudo xbps-install -S -y sleuthkit openjdk17-jre testdisk afflib-devel libewf-devel wget unzip
 
   # Directory Setup
   INSTALL_DIR="$HOME/Tools/autopsy"
@@ -154,8 +154,8 @@ install_caido(){
 
 install_adaptix() {
   echo "Installing adaptix..."
-  sudo xbps-install -S go qt6-base-devel qt6-svg-devel qt6-declarative-devel \
-    gcc make cmake git -y
+  sudo xbps-install -S -y go qt6-base-devel qt6-svg-devel qt6-declarative-devel \
+    gcc make cmake git
 
   INSTALL_DIR="$HOME/Tools/adaptix"
   mkdir -p "$INSTALL_DIR"
@@ -272,7 +272,7 @@ install_sliver() {
   chmod +x sliver-server sliver-client
 
   # Mingw for generating Windows-specific payloads.
-  sudo xbps-install -S mingw-w64-gcc -y
+  sudo xbps-install -S -y mingw-w64-gcc
 
   # Capabilities
   sudo setcap 'cap_net_bind_service=+ep' "$INSTALL_DIR/sliver-server"
@@ -289,6 +289,10 @@ install_bloodhound() {
   tar -xvzf bloodhound-cli-linux-amd64.tar.gz
   ./bloodhound-cli install
   ln -sf ~/Tools/bloodhound/bloodhound-cli ~/.local/bin/bloodhound-cli
+  uv tool install git+https://github.com/dirkjanm/BloodHound.py.git@bloodhound-ce
+  # Access it anywhere with:
+  # bloodhound-ce-python -u 'user' -p 'password' -d 'domain.local' -dc 'dc.domain.local' -c All
+  echo "Done..."
 }
 
 # ----------------------
@@ -303,8 +307,7 @@ setup_void_packages(){
 }
 
 install_utils() {
-  sudo xbps-install -Su
-  sudo xbps-install -S xtools terminator tmux fzf ripgrep chromium tor proxychains-ng socat wget git openvpn openssl jq yq bleachbit -y
+  sudo xbps-install -Su -y xtools terminator tmux fzf ripgrep chromium tor proxychains-ng socat wget git openvpn openssl jq yq bleachbit
   install_mise
   install_uv
   setup_void_packages
@@ -312,7 +315,7 @@ install_utils() {
 
 install_container_tools(){
   set -e
-  sudo xbps-install -Su docker docker-compose podman incus shadow
+  sudo xbps-install -Su -y docker docker-compose podman incus shadow
 
   # Configure Docker
   [ ! -L /var/service/containerd ] && sudo ln -s /etc/sv/containerd /var/service/
@@ -338,16 +341,30 @@ install_cloud(){
 }
 
 install_forensics(){
-  sudo xbps-install -Su binwalk foremost stegseek yara exiftool
+  sudo xbps-install -Su -y binwalk foremost stegseek yara exiftool
   uv tool install volatility3
 
   # Install Autopsy
-  # install_autopsy
+  install_autopsy
   # Todo - Test autopsy
 }
 
 install_reverse(){
-  :
+  echo "Installing reverse engineering tools..."
+  sudo xbps-install -Su -y xxd imhex ghidra rizin cutter gdb strace ltrace \
+    openjdk17 libxcb-devel xcb-util-wm-devel xcb-util-image-devel \
+    xcb-util-keysyms-devel xcb-util-renderutil-devel
+  sudo xbps-alternatives -s openjdk17
+
+  # Android tools
+  sudo xbps-install -Su -y android-tools apktool
+  sudo usermod -aG adbusers $USER
+  uv tool install ropgadget
+  uv tool install angr-management
+  uv tool install frida-tools
+  uv tool install objection
+  mise use -g github:skylot/jadx@latest
+  echo "Done..."
 }
 
 install_password(){
@@ -355,7 +372,7 @@ install_password(){
 }
 
 install_wireless(){
-  sudo xbps-install -Su aircrack-ng kismet hxctools hcxdumptool -y
+  sudo xbps-install -Su -y aircrack-ng kismet hxctools hcxdumptool
 
   # Install airgeddon
   git clone --depth 1 https://github.com/v1s1t0r1sh3r3/airgeddon.git
@@ -398,7 +415,7 @@ install_exploitation(){
   cp -n /opt/exploit-database/.searchsploit_rc ~/
 
   # Install Pretender
-  # install_pretender
+  install_pretender
   # Todo - Test Pretender
 }
 
@@ -420,12 +437,12 @@ install_web_testing(){
   mise use -g github:hahwul/dalfox@latest
 
   # Install Burp
-  # install_burp
+  install_burp
 
   # Install Caido
-  # install_caido
-
+  install_caido
 }
+
 
 install_recon_and_scanning(){
   sudo xbps-install -Su nmap masscan netcat -y
