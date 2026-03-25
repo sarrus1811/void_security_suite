@@ -146,8 +146,7 @@ install_caido(){
   chmod +x caido-desktop.AppImage
   ln -sf "$INSTALL_DIR/caido-desktop.AppImage" "$HOME/.local/bin/caido"
 
-  # Capabilities (The Security Step)
-  echo "Granting Network Capabilities to Caido CLI"
+  # Capabilities
   sudo setcap 'cap_net_bind_service=+ep' "$INSTALL_DIR/caido-cli"
   echo "Done..."
 }
@@ -290,9 +289,9 @@ install_bloodhound() {
   ./bloodhound-cli install
   ln -sf ~/Tools/bloodhound/bloodhound-cli ~/.local/bin/bloodhound-cli
   uv tool install git+https://github.com/dirkjanm/BloodHound.py.git@bloodhound-ce
-  # Access it anywhere with:
-  # bloodhound-ce-python -u 'user' -p 'password' -d 'domain.local' -dc 'dc.domain.local' -c All
   echo "Done..."
+  echo "Access it anywhere with:"
+  echo "bloodhound-ce-python -u 'user' -p 'password' -d 'domain.local' -dc 'dc.domain.local' -c All"
 }
 
 # ----------------------
@@ -306,8 +305,8 @@ setup_void_packages(){
   ./xbps-src binary-bootstrap
 }
 
-install_utils() {
-  sudo xbps-install -Su -y xtools terminator tmux fzf ripgrep chromium tor proxychains-ng socat wget git openvpn openssl jq yq bleachbit
+install_utilities() {
+  sudo xbps-install -Su -y xtools terminator tmux fzf bat ripgrep chromium tor proxychains-ng socat wget git openvpn openssl jq yq bleachbit
   install_mise
   install_uv
   setup_void_packages
@@ -337,7 +336,23 @@ install_container_tools(){
 }
 
 install_cloud(){
-  :
+  echo "Installing cloud tools..."
+  uv tool install prowler
+  uv tool install pacu
+  uv tool install cloudsplaining
+
+  # Recon & Scanning
+  mise use -g github:trufflesecurity/trufflehog@latest
+  mise use -g github:aquasecurity/trivy@latest
+
+  # Install Steampipe
+   mise use -g github:turbot/steampipe@latest
+  steampipe plugin install aws gcp azure
+
+  # Secrets
+  mise use -g github:zricethezav/gitleaks@latest
+  uv tool install kube-hunter
+  echo "Done..."
 }
 
 install_forensics(){
@@ -368,7 +383,7 @@ install_reverse(){
 }
 
 install_password(){
-  sudo xbps-install -Su hashcat john thc-hydra -y
+  sudo xbps-install -Su -y hashcat john thc-hydra cewl
 }
 
 install_wireless(){
@@ -381,21 +396,41 @@ install_wireless(){
 }
 
 install_network(){
-  sudo xbps-install -Su wireshark tcpdump arpwatch proxychains-ng
+  sudo xbps-install -Su -y wireshark tcpdump arpwatch proxychains-ng netcat-openbsd libpcap-devel libseccomp-devel cargo
+  sudo usermod -aG wireshark $USER
 
   # Install scapy
-  git clone --depth 1 https://github.com/void-linux/void-packages.git
-  cd void-packages
-  ./xbps-src binary-bootstrap
-  ./xbps-src pkg scapy
+  uv tool install scapy
+  SCAPY_PATH=$(uv tool dir)/scapy/bin/scapy
+  [ -f "$SCAPY_PATH" ] && sudo setcap cap_net_raw,cap_net_admin=eip "$SCAPY_PATH"
 
-  # sudo xi scapy
-  sudo xbps-install --repository=hostdir/binpkgs scapy
-  sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/scapy
+  # Install sniffglue
+  cargo install sniffglue
+  sudo setcap cap_net_raw,cap_net_admin=eip ~/.cargo/bin/sniffglue
 
   #Install bettercap
-  ./xbps-src pkg bettercap
-  sudo xbps-install --repository=hostdir/binpkgs bettercap
+  mise use -g github:bettercap/bettercap@latest
+  sudo setcap cap_net_raw,cap_net_admin=eip $(which bettercap)
+}
+
+install_recon_and_scanning(){
+  sudo xbps-install -Su -y nmap masscan
+
+  # Install project discovery suite
+  mise use -g github:projectdiscovery/subfinder@latest
+  mise use -g github:projectdiscovery/httpx@latest
+  mise use -g github:projectdiscovery/dnsx@latest
+  mise use -g github:projectdiscovery/nuclei@latest
+  mise use -g github:projectdiscovery/naabu@latest
+  mise use -g github:projectdiscovery/cvemap@latest
+  sudo setcap 'cap_net_raw,cap_net_admin+eip' $(which naabu)
+
+  mise use -g github:epi052/feroxbuster@latest
+
+  # Install amass
+  mise use -g github:owasp-amass/amass@latest
+  mkdir -p ~/Documents/Engagements/_amass_db
+  # e.g. usage: amass enum -d example.com -dir ~/Documents/Engagements/_amass_db
 }
 
 install_exploitation(){
@@ -414,8 +449,18 @@ install_exploitation(){
   sudo ln -sf /opt/exploitdb/searchsploit /usr/local/bin/searchsploit
   cp -n /opt/exploit-database/.searchsploit_rc ~/
 
+  # Install metasploit
+  install_msf
+
+  # Install Adaptix
+  install_adaptix
+
+  # Install sliver
+  # install_sliver
+
   # Install Pretender
   install_pretender
+
   # Todo - Test Pretender
 }
 
@@ -443,38 +488,49 @@ install_web_testing(){
   install_caido
 }
 
-
-install_recon_and_scanning(){
-  sudo xbps-install -Su nmap masscan netcat -y
-
-  # Install project discovery suite
-  mise use -g github:projectdiscovery/subfinder@latest
-  mise use -g github:projectdiscovery/httpx@latest
-  mise use -g github:projectdiscovery/dnsx@latest
-  mise use -g github:projectdiscovery/nuclei@latest
-  mise use -g github:projectdiscovery/naabu@latest
-  mise use -g github:projectdiscovery/cvemap@latest
-
-  sudo setcap 'cap_net_raw,cap_net_admin+eip' $(which naabu)
-
-  # Install amass
-  mise use -g github:owasp-amass/amass@latest
-  mkdir -p ~/Documents/Engagements/_amass_db
-  # e.g. usage: amass enum -d example.com -dir ~/Documents/Engagements/_amass_db
-}
-
 install_scripts(){
-  mkdir ~/scripts && cd ~/scripts
-  curl -LO https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh
-  mkdir ~/scripts/winPEAS && cd ~/scripts/winPEAS
-  curl -LO https://github.com/peass-ng/PEASS-ng/releases/latest/download/winPEASany.exe
-  mkdir /usr/share/wordlists && cd /usr/share/wordlists
-  git clone --depth 1 https://github.com/danielmiessler/SecLists.git
-  cd ~
+  echo "Installing scripts..."
+  local SCRIPT_DIR="$HOME/.local/share/scripts"
+  mkdir -p "$SCRIPT_DIR/linux" "$SCRIPT_DIR/windows" "$SCRIPT_DIR/wordlists"
+  curl -fsSL https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh \
+    -o "$SCRIPT_DIR/linux/linpeas.sh"
+  curl -fsSL https://raw.githubusercontent.com/mzet-/linux-exploit-suggester/master/linux-exploit-suggester.sh \
+    -o "$SCRIPT_DIR/linux/les.sh"
+  chmod +x "$SCRIPT_DIR/linux/"*.sh
+  curl -fsSL https://github.com/peass-ng/PEASS-ng/releases/latest/download/winPEASany.exe \
+    -o "$SCRIPT_DIR/windows/winPEAS.exe"
+  curl -fsSL https://raw.githubusercontent.com/PowerShellMafia/PowerSploit/master/Recon/PowerView.ps1 \
+    -o "$SCRIPT_DIR/windows/PowerView.ps1"
+  if [ ! -d "$SCRIPT_DIR/wordlists/SecLists" ]; then
+    git clone --depth 1 https://github.com/danielmiessler/SecLists.git "$SCRIPT_DIR/wordlists/SecLists"
+  fi
+  sudo ln -sfn "$SCRIPT_DIR/wordlists" /usr/share/wordlists 2>/dev/null || echo "(!) Note: Manual sudo required to link /usr/share/wordlists"
+  echo "Scripts available in $SCRIPT_DIR..."
+  echo "Done..."
 }
 
 install_development(){
-  sudo xbps-install -Su python3 emacs helix -y
+  sudo xbps-install -Su -y python3 cargo emacs helix
+}
+
+main() {
+  install_utilities
+  install_development
+  install_network
+  install_container_tools
+  install_recon_and_scanning
+  install_exploitation
+  install_wireless
+  install_web_testing
+  install_scripts
+  install_password
+  install_forensics
+  install_reverse
+  install_cloud
+
+  echo "===================================================="
+  echo " BUILD COMPLETE: Your system is live."
+  echo "===================================================="
 }
 
 trap 'tput cnorm' EXIT
@@ -562,7 +618,7 @@ printf "\n"
 tput cnorm
 
 echo "  You selected: ${BOLD}${OPTIONS[$SELECTED]}${RESET}"
-# Result
+
 case $SELECTED in
   0) echo "  → Full setup..." ;;
   1) echo "  → Installing category..." ;;
