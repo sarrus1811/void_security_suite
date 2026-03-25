@@ -30,21 +30,21 @@ install_uv() {
 
 install_mise() {
     echo "Installing mise..."
-
     curl https://mise.jdx.dev/install.sh | sh
     export PATH="$HOME/.local/bin:$PATH"
-    export PATH="$HOME/.local/share/mise/bin:$PATH"
     if ! grep -q 'mise activate bash' "$HOME/.bashrc"; then
         echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
         echo 'eval "$(~/.local/bin/mise activate bash)"' >> "$HOME/.bashrc"
-        echo "--- Added Mise activation to .bashrc ---"
     fi
     eval "$($HOME/.local/bin/mise activate bash)"
 
+    # Install the languages
     mise use -g go@latest
     mise use -g python@3.12
     mise use -g rust@latest
 
+    export GOPATH="${GOPATH:-$HOME/.local/share/go}"
+    export PATH="$GOPATH/bin:$PATH"
     echo "Done..."
 }
 
@@ -183,50 +183,19 @@ install_adaptix() {
 }
 
 install_pretender() {
-  echo "Installing pretender..."
-  cd ~/void-packages
-  PKG_NAME="pretender"
-  VERSION="1.3.2"
-  REPO_DIR=$(pwd)
-  TEMPLATE_DIR="$REPO_DIR/srcpkgs/$PKG_NAME"
+    echo "Installing pretender..."
+    export GOPATH="${GOPATH:-$HOME/.local/share/go}"
+    export PATH="$GOPATH/bin:$PATH"
+    go install github.com/RedTeamPentesting/pretender@latest
 
-  # Safety Check: Ensure the location is void-packages root
-  if [ ! -d "$REPO_DIR/srcpkgs" ]; then
-  echo "Error: Please run this script from the root of your void-packages directory."
-  exit 1
-  fi
-
-  echo "Preparing to build $PKG_NAME v$VERSION ..."
-  mkdir -p "$TEMPLATE_DIR"
-  cat <<EOF > "$TEMPLATE_DIR/template"
-# Template file for '$PKG_NAME'
-pkgname=$PKG_NAME
-version=$VERSION
-revision=1
-build_style=go
-go_import_path="github.com/RedTeamPentesting/pretender"
-distfiles="https://github.com/RedTeamPentesting/pretender/archive/refs/tags/v\${version}.tar.gz"
-checksum=686884860d5e865487779f4105826f06774e6229413693952a6592231268615e
-short_desc="MitM sidekick for relaying attacks (DHCPv6, mDNS, LLMNR)"
-maintainer="User <user@voidlinux.org>"
-license="MIT"
-homepage="https://github.com/RedTeamPentesting/pretender"
-EOF
-  echo "Check: Template created at $TEMPLATE_DIR/template"
-
-  ./xbps-src xgensum -i "$PKG_NAME"
-  ./xbps-src pkg "$PKG_NAME"
-
-  if [ $? -eq 0 ]; then
-  echo "Build successful! Installing..."
-  sudo xbps-install --repository=hostdir/binpkgs "$PKG_NAME"
-  else
-    echo "Error: Build failed. Check the output above."
-    exit 1
-  fi
-
-  sudo setcap cap_net_raw,cap_net_admin,cap_net_bind_service=eip /usr/bin/pretender
-  echo "$PKG_NAME v$VERSION is now installed and ready!"
+    if [ -f "$GOPATH/bin/pretender" ]; then
+        sudo setcap cap_net_raw,cap_net_admin=eip "$GOPATH/bin/pretender"
+        echo "Successfully set capabilities for pretender."
+    else
+        echo "Error: pretender binary not found at $GOPATH/bin/pretender"
+        return 1
+    fi
+    echo "Done..."
 }
 
 install_msf() {
@@ -297,19 +266,10 @@ install_bloodhound() {
 # ----------------------
 # Main install functions
 # ----------------------
-
-setup_void_packages(){
-  cd ~
-  git clone --depth 1 https://github.com/void-linux/void-packages.git
-  cd void-packages
-  ./xbps-src binary-bootstrap
-}
-
 install_utilities() {
   sudo xbps-install -Su -y xtools terminator tmux fzf bat ripgrep chromium tor proxychains-ng socat wget git openvpn openssl jq yq bleachbit
   install_mise
   install_uv
-  setup_void_packages
 }
 
 install_container_tools(){
@@ -456,7 +416,7 @@ install_exploitation(){
   install_adaptix
 
   # Install sliver
-  # install_sliver
+  install_sliver
 
   # Install Pretender
   install_pretender
@@ -527,7 +487,6 @@ main() {
   install_forensics
   install_reverse
   install_cloud
-
   echo "===================================================="
   echo " BUILD COMPLETE: Your system is live."
   echo "===================================================="
