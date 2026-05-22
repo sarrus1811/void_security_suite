@@ -8,35 +8,61 @@
 # ----------------------
 # Sub install functions
 # ----------------------
+setup_environment_paths() {
+  local path_export='export PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"'
+  if ! grep -Fxq "$path_export" ~/.bashrc; then
+    echo -e "\n# Security Lab Paths\n$path_export" >> ~/.bashrc
+  fi
+  export PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"
+}
+
+install_nix(){
+  echo "Installing nix package manager..."
+  if ! command -v nix &> /dev/null; then
+    echo "Installing official Nix binary..."
+    sh <(curl -L https://nixos.org/nix/install) --daemon
+    . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+  else
+    echo "Nix is already installed."
+  fi
+
+  if [ ! -d /etc/sv/nix-daemon ]; then
+    sudo mkdir -p /etc/sv/nix-daemon
+    echo -e '#!/bin/sh\nexec /nix/var/nix/profiles/default/bin/nix-daemon' | sudo tee /etc/sv/nix-daemon/run
+    sudo chmod +x /etc/sv/nix-daemon/run
+    sudo ln -s /etc/sv/nix-daemon /var/service/
+  fi
+  sudo sv up nix-daemon
+
+  echo "Waiting for daemon..."
+  until nix ping-store >/dev/null 2>&1; do sleep 1; done
+  sudo mkdir -p /etc/nix
+  echo "experimental-features = nix-command flakes" | sudo tee /etc/nix/nix.conf
+  mkdir -p ~/.config/nixpkgs
+  echo '{ allowUnfree = true; }' > ~/.config/nixpkgs/config.nix
+  echo "trusted-users = root ${USER}" | sudo tee -a /etc/nix/nix.conf
+  sudo sv restart nix-daemon
+  echo "Done..."
+}
+
 install_uv() {
   echo "Installing uv..."
   curl -LsSf https://astral.sh/uv/install.sh | sh
-
-  local bin_path='export PATH="$HOME/.local/bin:$PATH"'
-  if ! grep -Fxq "$bin_path" ~/.bashrc; then
-    echo -e "\n# Local Bin Path\n$bin_path" >> ~/.bashrc
+  if ! grep -q "uv generate-shell-completion" ~/.bashrc; then
+    echo 'eval "$(uv generate-shell-completion bash)"' >> ~/.bashrc
   fi
-
-  local uv_completion='eval "$(uv generate-shell-completion bash)"'
-  if ! grep -Fxq "$uv_completion" ~/.bashrc; then
-    echo "$uv_completion" >> ~/.bashrc
-    echo "Added uv shell completion to ~/.bashrc"
-  fi
-
-  export PATH="$HOME/.local/bin:$PATH"
   eval "$(uv generate-shell-completion bash)"
   echo "Done..."
 }
 
 install_mise() {
-    echo "Installing mise..."
-    curl https://mise.jdx.dev/install.sh | sh
-    export PATH="$HOME/.local/bin:$PATH"
-    if ! grep -q 'mise activate bash' "$HOME/.bashrc"; then
-        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
-        echo 'eval "$(~/.local/bin/mise activate bash)"' >> "$HOME/.bashrc"
-    fi
-    eval "$($HOME/.local/bin/mise activate bash)"
+  echo "Installing mise..."
+  curl https://mise.jdx.dev/install.sh | sh
+
+  if ! grep -q 'mise activate bash' "$HOME/.bashrc"; then
+    echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc
+  fi
+  eval "$(~/.local/bin/mise activate bash)"
 
     # Install the languages
     mise use -g go@latest
@@ -90,96 +116,84 @@ EOF
 }
 
 install_burp(){
-  echo "Installing burpsuite"
-  BURP_URL="https://portswigger.net/burp/releases/download?product=pro&version=2026.3&type=Linux"
-  INSTALLER_NAME="burpsuite_community_linux.sh"
+  echo "Installing Burp Suite..."
   INSTALL_DIR="$HOME/Tools/BurpSuite"
-
-  echo "Preparing Burp Suite Installation"
   mkdir -p "$INSTALL_DIR"
 
-  #  Download Installer
-  if [ ! -f "$INSTALLER_NAME" ]; then
-  echo "Downloading Burp Suite Community"
-  wget -O "$INSTALLER_NAME" "$BURP_URL"
-  fi
-
-  echo "Running Installer"
-  chmod +x "$INSTALLER_NAME"
-  ./"$INSTALLER_NAME" -c
-
-  echo "Granting Network Capabilities to Burp's Bundled JRE"
-  BUNDLED_JAVA=$(find "$INSTALL_DIR" -name java -type f)
-
-  if [ -n "$BUNDLED_JAVA" ]; then
-  sudo setcap 'cap_net_bind_service=+ep' "$BUNDLED_JAVA"
-  echo "Capabilities applied to: $BUNDLED_JAVA"
-  else
-    echo "Warning: Could not find bundled Java to apply capabilities."
-  fi
-
-  # Launcher Sync
   if [ -f "$INSTALL_DIR/burpsuite_community" ]; then
-    ln -sf "$INSTALL_DIR/burpsuite_community" "$HOME/.local/bin/burpsuite"
-    echo "Setup Complete! Run with 'burpsuite'"
+    echo "Burp Suite already installed."
+  else
+    wget -O /tmp/burp_installer.sh "https://portswigger.net/burp/releases/download?product=community&version=2026.3&type=Linux"
+    chmod +x /tmp/burp_installer.sh
+    /tmp/burp_installer.sh -c -q -dir "$INSTALL_DIR"
+    # CLEANUP: Remove installer after success
+    rm -f /tmp/burp_installer.sh
   fi
+
+  BUNDLED_JAVA=$(find "$INSTALL_DIR" -name java -type f | head -n 1)
+  [ -n "$BUNDLED_JAVA" ] && sudo setcap 'cap_net_bind_service=+ep' "$BUNDLED_JAVA"
+
+  ln -sf "$INSTALL_DIR/burpsuite_community" "$HOME/.local/bin/burpsuite"
+  echo "Done..."
 }
 
 install_caido(){
   echo "Installing Caido..."
-  VERSION="0.55.3"
-  CAIDO_CLI_URL="https://github.com/caido/caido/releases/download/v${VERSION}/caido-cli-v${VERSION}-linux-x86_64.tar.gz"
-  CAIDO_APP_URL="https://github.com/caido/caido/releases/download/v${VERSION}/caido-desktop-v${VERSION}-linux-x86_64.AppImage"
-  INSTALL_DIR="$HOME/Tools/caido"
+  # DEPENDENCY: Ensure fuse is installed for AppImage execution
+  sudo xbps-install -S -y fuse
 
+  VERSION="0.55.3"
+  INSTALL_DIR="$HOME/Tools/caido"
   mkdir -p "$INSTALL_DIR"
-  cd "$INSTALL_DIR"
 
   # Install CLI
-  wget -O caido-cli.tar.gz "$CAIDO_CLI_URL"
-  tar -xzf caido-cli.tar.gz
-  chmod +x caido-cli
+  if [ ! -f "$INSTALL_DIR/caido-cli" ]; then
+    wget -O "$INSTALL_DIR/caido-cli.tar.gz" "https://github.com/caido/caido/releases/download/v${VERSION}/caido-cli-v${VERSION}-linux-x86_64.tar.gz"
+    tar -xzf "$INSTALL_DIR/caido-cli.tar.gz" -C "$INSTALL_DIR"
+    rm -f "$INSTALL_DIR/caido-cli.tar.gz" # Cleanup
+    chmod +x "$INSTALL_DIR/caido-cli"
+    sudo setcap 'cap_net_bind_service=+ep' "$INSTALL_DIR/caido-cli"
+  fi
   ln -sf "$INSTALL_DIR/caido-cli" "$HOME/.local/bin/caido-cli"
 
-  # Install Desktop (AppImage)
-  wget -O caido-desktop.AppImage "$CAIDO_APP_URL"
-  chmod +x caido-desktop.AppImage
+  # Install Desktop
+  if [ ! -f "$INSTALL_DIR/caido-desktop.AppImage" ]; then
+    wget -O "$INSTALL_DIR/caido-desktop.AppImage" "https://github.com/caido/caido/releases/download/v${VERSION}/caido-desktop-v${VERSION}-linux-x86_64.AppImage"
+    chmod +x "$INSTALL_DIR/caido-desktop.AppImage"
+  fi
   ln -sf "$INSTALL_DIR/caido-desktop.AppImage" "$HOME/.local/bin/caido"
-
-  # Capabilities
-  sudo setcap 'cap_net_bind_service=+ep' "$INSTALL_DIR/caido-cli"
   echo "Done..."
 }
 
 install_adaptix() {
-  echo "Installing adaptix..."
-  sudo xbps-install -S -y go qt6-base-devel qt6-svg-devel qt6-declarative-devel \
-    gcc make cmake git
-
+  echo "Installing Adaptix..."
+  sudo xbps-install -S -y go qt6-base-devel qt6-svg-devel qt6-declarative-devel gcc make cmake git
   INSTALL_DIR="$HOME/Tools/adaptix"
   mkdir -p "$INSTALL_DIR"
-  cd "$INSTALL_DIR"
 
-  if [ ! -d "AdaptixC2" ]; then
-    git clone --recursive https://github.com/Adaptix-Framework/AdaptixC2.git
+  if [ ! -d "$INSTALL_DIR/AdaptixC2" ]; then
+    git clone --recursive https://github.com/Adaptix-Framework/AdaptixC2.git "$INSTALL_DIR/AdaptixC2"
+  else
+    cd "$INSTALL_DIR/AdaptixC2" && git pull --recurse-submodules
   fi
-  cd AdaptixC2
 
+  cd "$INSTALL_DIR/AdaptixC2"
+
+  # Build Server
   cd AdaptixServer
   go build -o ../bin/teamserver main.go
   cd ..
 
+  # Build Client
   mkdir -p build && cd build
-  cmake ..
-  make -j$(nproc)
+  cmake .. && make -j$(nproc)
   cp AdaptixClient ../bin/
   cd ..
 
   sudo setcap 'cap_net_bind_service=+ep' bin/teamserver
-
   ln -sf "$INSTALL_DIR/AdaptixC2/bin/teamserver" "$HOME/.local/bin/adaptix-server"
   ln -sf "$INSTALL_DIR/AdaptixC2/bin/AdaptixClient" "$HOME/.local/bin/adaptix-client"
-  echo "Done..."
+  echo "Adaptix ready."
 }
 
 install_pretender() {
@@ -198,40 +212,13 @@ install_pretender() {
     echo "Done..."
 }
 
-install_msf() {
-  echo "Installing metasploit..."
-  sudo xbps-install -S postgresql postgresql-libs-devel libpcap-devel \
-    libxml2-devel libxslt-devel readline-devel sqlite-devel \
-    ncurses-devel libffi-devel openssl-devel zlib-devel -y
-
-  INSTALL_DIR="$HOME/Tools/metasploit"
-  mkdir -p "$INSTALL_DIR"
-  cd "$INSTALL_DIR"
-
-  curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall
-  chmod +x msfinstall
-  ./msfinstall
-
-  # Capabilities
-  MSF_RUBY="/opt/metasploit-framework/embedded/bin/ruby"
-  sudo setcap 'cap_net_bind_service=+ep' "$MSF_RUBY"
-
-  echo "Initializing Metasploit Database..."
-  msfdb init
-
-  # Sync Launchers
-  ln -sf /opt/metasploit-framework/bin/msfconsole "$HOME/.local/bin/msfconsole"
-  ln -sf /opt/metasploit-framework/bin/msfvenom "$HOME/.local/bin/msfvenom"
-
-  echo "Done..."
-}
-
 install_sliver() {
-  echo "Installing sliver Adversary Emulation Framework..."
-  VERSION="1.7.3"
+  echo "Installing Sliver Adversary Emulation Framework..."
+  VERSION="1.5.42" # Update this to the latest BishopFox release as needed
   SERVER_URL="https://github.com/BishopFox/sliver/releases/download/v${VERSION}/sliver-server_linux"
   CLIENT_URL="https://github.com/BishopFox/sliver/releases/download/v${VERSION}/sliver-client_linux"
   INSTALL_DIR="$HOME/Tools/sliver"
+
   mkdir -p "$INSTALL_DIR"
   cd "$INSTALL_DIR"
 
@@ -242,25 +229,13 @@ install_sliver() {
   # Mingw for generating Windows-specific payloads.
   sudo xbps-install -S -y mingw-w64-gcc
 
-  # Capabilities
+  # Capabilities for listeners
   sudo setcap 'cap_net_bind_service=+ep' "$INSTALL_DIR/sliver-server"
 
   # Sync Launchers
   ln -sf "$INSTALL_DIR/sliver-server" "$HOME/.local/bin/sliver-server"
   ln -sf "$INSTALL_DIR/sliver-client" "$HOME/.local/bin/sliver-client"
-  echo "Done..."
-}
-
-install_bloodhound() {
-  echo "Installing bloodhound"
-  mkdir -p ~/Tools/bloodhound && cd ~/Tools/bloodhound
-  tar -xvzf bloodhound-cli-linux-amd64.tar.gz
-  ./bloodhound-cli install
-  ln -sf ~/Tools/bloodhound/bloodhound-cli ~/.local/bin/bloodhound-cli
-  uv tool install git+https://github.com/dirkjanm/BloodHound.py.git@bloodhound-ce
-  echo "Done..."
-  echo "Access it anywhere with:"
-  echo "bloodhound-ce-python -u 'user' -p 'password' -d 'domain.local' -dc 'dc.domain.local' -c All"
+  echo "Sliver ready."
 }
 
 # ----------------------
@@ -319,9 +294,10 @@ install_forensics(){
   sudo xbps-install -Su -y binwalk foremost stegseek yara exiftool
   uv tool install volatility3
 
+  # Install logparsring tools
+  cargo install evtx
   # Install Autopsy
   install_autopsy
-  # Todo - Test autopsy
 }
 
 install_reverse(){
@@ -396,9 +372,10 @@ install_recon_and_scanning(){
 install_exploitation(){
   uv tool install impacket
   uv tool install responder
-  uv tool install crackmapexec
   uv tool install evil-winrm
   uv tool install netexec
+  uv tool install certipy-ad
+  uv tool install mitm6
 
   # Install pwntools
   sudo xbps-install -S binutils-multiarch libelf-devel libffi-devel openssl-devel -y
@@ -410,42 +387,54 @@ install_exploitation(){
   cp -n /opt/exploit-database/.searchsploit_rc ~/
 
   # Install metasploit
-  install_msf
+  nix profile add nixpkgs#metasploit
 
+  # Payloads & Utilities
+  nix profile add nixpkgs#cosign
+
+  # SharpCollection (Syncing to Tools)
+  mkdir -p ~/Tools/SharpCollection
+  git clone --depth 1 https://github.com/Flangvik/SharpCollection.git ~/Tools/SharpCollection
+
+  # --- C2 & Capability-Required Tooling ---
   # Install Adaptix
   install_adaptix
 
   # Install sliver
-  install_sliver
+  nix profile add nixpkgs#sliver
 
   # Install Pretender
-  install_pretender
+  nix profile add nixpkgs#bloodhound
 
-  # Todo - Test Pretender
+  export PATH="$HOME/.local/bin:$HOME/.nix-profile/bin:$PATH"
+  alias bloodhound='BloodHound --no-sandbox'
 }
 
 install_web_testing(){
+  echo "Updating system packages..."
   sudo xbps-install -S nikto
+
+  echo "Installing Python-based tools..."
   uv tool install sqlmap
   uv tool install xsstrike
 
-  # Install ffuf
-  mise use -g github:ffuf/ffuf@latest
+  echo "Installing Go/Binary tools..."
+  mise use -g go@latest
+  go install github.com/ffuf/ffuf/v2@latest
+  go install github.com/OJ/gobuster/v3@latest
+  go install github.com/epi052/feroxbuster@latest
+  go install github.com/hahwul/dalfox/v3@latest
 
-  # Install gobuster
-  mise use -g github:OJ/gobuster@latest
-
-  # Install feroxbuster
-  mise use -g github:epi052/feroxbuster@latest
-
-  # Install dalfox
-  mise use -g github:hahwul/dalfox@latest
-
-  # Install Burp
   install_burp
-
-  # Install Caido
   install_caido
+
+  local bashrc="$HOME/.bashrc"
+
+  grep -q "alias burpsuite=" "$bashrc" || \
+    echo "alias burpsuite='LD_LIBRARY_PATH=\$HOME/Tools/BurpSuite/lib burpsuite'" >> "$bashrc"
+
+  grep -q "alias caido=" "$bashrc" || \
+    echo "alias caido='caido --no-sandbox'" >> "$bashrc"
 }
 
 install_scripts(){
@@ -469,11 +458,17 @@ install_scripts(){
   echo "Done..."
 }
 
-install_development(){
-  sudo xbps-install -Su -y python3 cargo emacs helix
+install_reporting(){
+  # Install reporting tools
+  nix profile add nixpkgs#quarto
+
 }
 
-main() {
+install_development(){
+  sudo xbps-install -Su python3 cargo emacs helix -y
+}
+
+full_install() {
   install_utilities
   install_development
   install_network
@@ -490,6 +485,15 @@ main() {
   echo "===================================================="
   echo " BUILD COMPLETE: Your system is live."
   echo "===================================================="
+}
+
+update_system() {
+  echo "Syncing repositories and updating Void Linux..."
+  sudo xbps-install -Su -y
+}
+
+test_function(){
+  install_exploitation
 }
 
 trap 'tput cnorm' EXIT
@@ -584,6 +588,6 @@ case $SELECTED in
   2) echo "  → Updating...";;
   3)
     echo "  → Testing"
-    install_mise ;;
+    test_function ;;
   4) echo "  → Goodbye!"; exit 0;;
 esac
