@@ -21,11 +21,16 @@ install_nix(){
   if ! command -v nix &> /dev/null; then
     echo "Installing official Nix binary..."
     sh <(curl -L https://nixos.org/nix/install) --daemon
-    . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
   else
     echo "Nix is already installed."
   fi
 
+  # Source profile to ensure PATH is loaded in the current script context
+  if [ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
+    . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+  fi
+
+  # Set up Void Linux runit service for nix-daemon
   if [ ! -d /etc/sv/nix-daemon ]; then
     sudo mkdir -p /etc/sv/nix-daemon
     echo -e '#!/bin/sh\nexec /nix/var/nix/profiles/default/bin/nix-daemon' | sudo tee /etc/sv/nix-daemon/run
@@ -35,12 +40,27 @@ install_nix(){
   sudo sv up nix-daemon
 
   echo "Waiting for daemon..."
-  until nix ping-store >/dev/null 2>&1; do sleep 1; done
+
+  # Use full binary path and a max 15-second retry loop to prevent infinite hanging
+  local NIX_BIN="/nix/var/nix/profiles/default/bin/nix"
+  local retries=15
+  until "$NIX_BIN" ping-store >/dev/null 2>&1 || [ $retries -eq 0 ]; do
+    sleep 1
+    ((retries--))
+  done
+
+  if [ $retries -eq 0 ]; then
+    echo -e "\e[31m[!] nix-daemon failed to respond in time. Check 'sudo sv status nix-daemon'.\e[0m"
+    return 1
+  fi
+
+  # Configure Nix experimental features and user privileges
   sudo mkdir -p /etc/nix
   echo "experimental-features = nix-command flakes" | sudo tee /etc/nix/nix.conf
   mkdir -p ~/.config/nixpkgs
   echo '{ allowUnfree = true; }' > ~/.config/nixpkgs/config.nix
   echo "trusted-users = root ${USER}" | sudo tee -a /etc/nix/nix.conf
+
   sudo sv restart nix-daemon
   echo "Done..."
 }
@@ -245,6 +265,7 @@ install_utilities() {
   sudo xbps-install -Su -y xtools terminator tmux fzf bat ripgrep chromium tor proxychains-ng socat wget git openvpn openssl jq yq bleachbit
   install_mise
   install_uv
+  install_nix
 }
 
 install_container_tools(){
@@ -281,7 +302,7 @@ install_cloud(){
   mise use -g github:aquasecurity/trivy@latest
 
   # Install Steampipe
-   mise use -g github:turbot/steampipe@latest
+  mise use -g github:turbot/steampipe@latest
   steampipe plugin install aws gcp azure
 
   # Secrets
@@ -465,7 +486,7 @@ install_reporting(){
 }
 
 install_development(){
-  sudo xbps-install -Su python3 cargo emacs helix -y
+  sudo xbps-install -Su python3 cargo emacs joe -y
 }
 
 full_install() {
@@ -487,6 +508,143 @@ full_install() {
   echo "===================================================="
 }
 
+#!/usr/bin/env bash
+
+multi_install() {
+  local funcs=(
+    "install_utilities"
+    "install_development"
+    "install_network"
+    "install_container_tools"
+    "install_recon_and_scanning"
+    "install_exploitation"
+    "install_wireless"
+    "install_web_testing"
+    "install_scripts"
+    "install_password"
+    "install_forensics"
+    "install_reverse"
+    "install_cloud"
+  )
+
+  local labels=(
+    "Basic Utilities"
+    "Development Tools"
+    "Networking Utilities"
+    "Container Tools (Incus / Podman)"
+    "Reconnaissance & Scanning"
+    "Exploitation Frameworks"
+    "Wireless Security Tools"
+    "Web Application Testing"
+    "Custom Scripts & Wordlists"
+    "Password & Hash Cracking"
+    "Digital Forensics Tools"
+    "Reverse Engineering"
+    "Cloud Security Tools"
+  )
+
+  local count=${#funcs[@]}
+  local choices=()
+  for ((i=0; i<count; i++)); do
+    choices[i]=0 # 0 = unselected, 1 = selected
+  done
+
+  local current=0
+
+  cursor_off() { printf "\e[?25l"; }
+  cursor_on()  { printf "\e[?25h"; }
+  trap 'cursor_on; echo -e "\n\e[31m[!] Selection cancelled.\e[0m"; return 1' INT TERM
+
+  draw_menu() {
+    printf "\e[1;33m=== Custom Platform Module Selection ===\e[0m\n\n"
+    for ((i=0; i<count; i++)); do
+      local mark="[ ]"
+      [[ ${choices[i]} -eq 1 ]] && mark="[\e[32mX\e[0m]"
+
+      if [[ $i -eq $current ]]; then
+        printf " \e[1;36m>\e[0m %b \e[1;37m%s\e[0m\n" "$mark" "${labels[i]}"
+      else
+        printf "   %b %s\n" "$mark" "${labels[i]}"
+      fi
+    done
+    printf "\n\e[90mControls: [↑/↓ or C-p/C-n] Move | [Space] Toggle | [a] Select All | [n] Select None | [Enter] Confirm\e[0m\n"
+  }
+
+  clear_menu() {
+    local lines_to_clear=$((count + 4))
+    for ((i=0; i<lines_to_clear; i++)); do
+      printf "\e[1A\e[K"
+    done
+  }
+
+  cursor_off
+  draw_menu
+
+  while true; do
+    IFS= read -rsn1 key
+    case "$key" in
+      $'\x1b')
+        read -rsn2 -t 0.1 key2
+        case "$key2" in
+          '[A'|'OA')
+            ((current--))
+            [[ $current -lt 0 ]] && current=$((count - 1))
+            ;;
+          '[B'|'OB')
+            ((current++))
+            [[ $current -ge $count ]] && current=0
+            ;;
+        esac
+        ;;
+      $'\x10')
+        ((current--))
+        [[ $current -lt 0 ]] && current=$((count - 1))
+        ;;
+      $'\x0e')
+        ((current++))
+        [[ $current -ge $count ]] && current=0
+        ;;
+      ' ')
+        choices[current]=$((1 - choices[current]))
+        ;;
+      'a'|'A')
+        for ((i=0; i<count; i++)); do choices[i]=1; done
+        ;;
+      'n'|'N')
+        for ((i=0; i<count; i++)); do choices[i]=0; done
+        ;;
+      ''|$'\n'|$'\r')
+        break
+        ;;
+    esac
+    clear_menu
+    draw_menu
+  done
+
+  cursor_on
+  echo ""
+
+  local selected_funcs=()
+  for ((i=0; i<count; i++)); do
+    if [[ ${choices[i]} -eq 1 ]]; then
+      selected_funcs+=("${funcs[i]}")
+    fi
+  done
+
+  if [[ ${#selected_funcs[@]} -eq 0 ]]; then
+    echo -e "\e[33m[!] No modules selected. Returning to main menu.\e[0m"
+    return 0
+  fi
+
+  echo -e "\e[1;32m[*] Executing ${#selected_funcs[@]} selected installation block(s)...\e[0m\n"
+  for fn in "${selected_funcs[@]}"; do
+    echo -e "\e[1;34m[>] Running step: $fn\e[0m"
+    "$fn"
+  done
+
+  echo -e "\n\e[1;32m[+] Selected installations completed successfully!\e[0m"
+}
+
 update_system() {
   echo "Syncing repositories and updating Void Linux..."
   sudo xbps-install -Su -y
@@ -502,13 +660,12 @@ OPTIONS=(
   "1. Full setup"
   "2. Install by category"
   "3. Update"
-  "4. Testing"
+  "4. Select and Install"
   "5. Exit"
 )
 
-# ----------------------
+
 # UI related functions
-#-----------------------
 SELECTED=0
 TOTAL=${#OPTIONS[@]}
 
@@ -518,7 +675,7 @@ CURSOR_UP="${ESC}[A"
 CLEAR_LINE="${ESC}[2K"
 BOLD="${ESC}[1m"
 RESET="${ESC}[0m"
-HIGHLIGHT="${ESC}[7m"   # reverse video (highlight)
+HIGHLIGHT="${ESC}[7m"   # reverse video
 
 # Hide cursor while navigating
 tput civis
@@ -588,6 +745,6 @@ case $SELECTED in
   2) echo "  → Updating...";;
   3)
     echo "  → Testing"
-    test_function ;;
+    multi_install ;;
   4) echo "  → Goodbye!"; exit 0;;
 esac
