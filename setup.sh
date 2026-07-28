@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
-if [ "$EUID" -ne 0 ]; then
-  echo "Please run as root (sudo)"
-  exit
-fi
+# if [ "$EUID" -ne 0 ]; then
+#   echo "Please run as root (sudo)"
+#   exit
+# fi
 
 # ----------------------
 # Sub install functions
@@ -16,38 +16,54 @@ setup_environment_paths() {
   export PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"
 }
 
-install_nix() {
-  echo "Installing and configuring Nix package manager for Void Linux..."
+ensure_user_path() {
+  local CURRENT_USER="${SUDO_USER:-$USER}"
+  local USER_HOME
+  USER_HOME="$(eval echo "~$CURRENT_USER")"
 
-  # 1. Ensure required base packages are installed on a fresh system
-  if command -v xbps-install &> /dev/null; then
-    echo "Ensuring base dependencies (curl, tar, xz, ca-certificates) are present..."
+  echo "[*] Configuring shell environment in $USER_HOME/.bashrc..."
+
+  if ! grep -q '\.cargo/bin' "$USER_HOME/.bashrc"; then
+    echo 'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"' >> "$USER_HOME/.bashrc"
+  fi
+
+  if ! grep -q 'mise activate bash' "$USER_HOME/.bashrc"; then
+    echo 'eval "$($HOME/.local/bin/mise activate bash)"' >> "$USER_HOME/.bashrc"
+  fi
+
+  chown "$CURRENT_USER:" "$USER_HOME/.bashrc"
+}
+
+install_nix() {
+  echo "Installing Nix package manager..."
+  local CURRENT_USER="${SUDO_USER:-$USER}"
+  local USER_HOME
+  USER_HOME="$(eval echo "~$CURRENT_USER")"
+
+  if command -v xbps-install >/dev/null 2>&1; then
+    echo "Ensuring base dependencies are present..."
     sudo xbps-install -Sy curl tar xz ca-certificates
   fi
 
-  # 2. Stop any running nix-daemon to prevent binary lockups
   if [ -L /var/service/nix-daemon ]; then
     echo "Stopping active nix-daemon service..."
     sudo sv down nix-daemon >/dev/null 2>&1 || true
     sudo rm -f /var/service/nix-daemon
   fi
-  sudo pkill -9 -f nix-daemon >/dev/null 2>&1 || true
+  sudo pkill -x nix-daemon >/dev/null 2>&1 || true
 
-  # 3. Clean up installer backup files that cause installer aborts
   echo "Cleaning up leftover backup files..."
   sudo rm -f /etc/bashrc.backup-before-nix \
              /etc/zshrc.backup-before-nix \
              /etc/bash.bashrc.backup-before-nix
 
-  # 4. Install official Nix binary if not present
-  if ! command -v nix &> /dev/null; then
+  if ! command -v nix >/dev/null 2>&1; then
     echo "Installing official Nix binary..."
-    sh <(curl -L https://nixos.org/nix/install) --daemon
+    yes | sh <(curl -L https://nixos.org/nix/install) --daemon
   else
     echo "Nix binary is already installed."
   fi
 
-  # 5. Set up system-wide SSL cert environment variables for Void Linux
   echo "Setting up Void Linux SSL certificate environment..."
   sudo mkdir -p /etc/profile.d
   cat << 'EOF' | sudo tee /etc/profile.d/nix-ssl.sh > /dev/null
@@ -57,7 +73,6 @@ EOF
   sudo chmod +x /etc/profile.d/nix-ssl.sh
   . /etc/profile.d/nix-ssl.sh
 
-  # 6. Configure Void Linux runit service with Void's CA certificate bundle
   echo "Configuring runit service for nix-daemon..."
   sudo mkdir -p /etc/sv/nix-daemon
   cat << 'EOF' | sudo tee /etc/sv/nix-daemon/run > /dev/null
@@ -69,83 +84,82 @@ exec /nix/var/nix/profiles/default/bin/nix-daemon
 EOF
   sudo chmod +x /etc/sv/nix-daemon/run
 
-  # Enable service in runit
   sudo ln -sf /etc/sv/nix-daemon /var/service/
 
-  # Wait for runsvdir to initialize the 'supervise' control directory
-  echo "Waiting for runit to initialize..."
+  echo "Waiting for runit to initialize service..."
   local sv_wait=10
-  while [ ! -d /etc/sv/nix-daemon/supervise ] && [ $sv_wait -gt 0 ]; do
+  while [ ! -d /etc/sv/nix-daemon/supervise ] && [ "$sv_wait" -gt 0 ]; do
     sleep 1
     sv_wait=$((sv_wait - 1))
   done
 
   sudo sv up nix-daemon
 
-  # 7. Source Nix profile into current shell context
   if [ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
     . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
   fi
 
-  # 8. Configure Nix features (Flakes, unfree packages, trusted users)
   echo "Configuring /etc/nix/nix.conf..."
   sudo mkdir -p /etc/nix
   cat << EOF | sudo tee /etc/nix/nix.conf > /dev/null
 experimental-features = nix-command flakes
-trusted-users = root ${USER:-$LOGNAME}
+trusted-users = root ${CURRENT_USER}
 EOF
 
-  mkdir -p ~/.config/nixpkgs
-  echo '{ allowUnfree = true; }' > ~/.config/nixpkgs/config.nix
+  # Target the ACTUAL user's config directory, not root's ~
+  sudo -u "$CURRENT_USER" mkdir -p "$USER_HOME/.config/nixpkgs"
+  echo '{ allowUnfree = true; }' | sudo -u "$CURRENT_USER" tee "$USER_HOME/.config/nixpkgs/config.nix" >/dev/null
 
-  # Restart daemon to apply nix.conf updates
   sudo sv restart nix-daemon
 
-  # 9. Verify daemon store connection
   echo "Verifying daemon store connection..."
   local NIX_BIN="/nix/var/nix/profiles/default/bin/nix"
   local retries=15
-  until "$NIX_BIN" store ping >/dev/null 2>&1 || [ $retries -eq 0 ]; do
+  until "$NIX_BIN" store ping >/dev/null 2>&1 || [ "$retries" -eq 0 ]; do
     sleep 1
     retries=$((retries - 1))
   done
 
-  if [ $retries -eq 0 ]; then
-    echo -e "\e[31m[!] nix-daemon failed to respond in time. Check 'sudo sv status nix-daemon'.\e[0m"
+  if [ "$retries" -eq 0 ]; then
+    echo "Error: nix-daemon failed to respond in time."
     return 1
   fi
 
-  echo "Done! Nix is ready to use."
+  echo "Done..."
 }
 
 install_uv() {
   echo "Installing uv..."
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  if ! grep -q "uv generate-shell-completion" ~/.bashrc; then
-    echo 'eval "$(uv generate-shell-completion bash)"' >> ~/.bashrc
-  fi
-  eval "$(uv generate-shell-completion bash)"
+  local CURRENT_USER="${SUDO_USER:-$USER}"
+  local USER_HOME
+  USER_HOME="$(eval echo "~$CURRENT_USER")"
+
+  echo "Installing uv for $CURRENT_USER..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+
+  ensure_user_path
   echo "Done..."
 }
 
 install_mise() {
   echo "Installing mise..."
-  curl https://mise.jdx.dev/install.sh | sh
+  local CURRENT_USER="${SUDO_USER:-$USER}"
+  local USER_HOME
+  USER_HOME="$(eval echo "~$CURRENT_USER")"
 
-  if ! grep -q 'mise activate bash' "$HOME/.bashrc"; then
-    echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc
-  fi
-  eval "$(~/.local/bin/mise activate bash)"
+  echo "Installing mise for $CURRENT_USER..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" sh -c 'curl https://mise.jdx.dev/install.sh | sh'
 
-    # Install the languages
-    mise use -g go@latest
-    mise use -g python@3.12
-    mise use -g rust@latest
+  # Refresh environment paths before using mise commands
+  ensure_user_path
 
-    export GOPATH="${GOPATH:-$HOME/.local/share/go}"
-    export PATH="$GOPATH/bin:$PATH"
-    echo "Done..."
+  echo "[*] Installing languages via mise..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g go@latest
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g python@3.12
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g rust@latest
+  echo "Done..."
 }
+
 
 install_autopsy(){
   echo "Installing Autopsy..."
@@ -319,6 +333,7 @@ install_utilities() {
   install_mise
   install_uv
   install_nix
+  ensure_user_path
 }
 
 install_container_tools(){
@@ -376,19 +391,34 @@ install_forensics(){
 
 install_reverse(){
   echo "Installing reverse engineering tools..."
+  local CURRENT_USER="${SUDO_USER:-$USER}"
+  local USER_HOME
+  USER_HOME="$(eval echo "~$CURRENT_USER")"
+
+  export PATH="$USER_HOME/.local/bin:$USER_HOME/.local/share/mise/bin:$PATH"
+
+  echo "[*] Installing reverse engineering system packages..."
   sudo xbps-install -Su -y xxd imhex ghidra rizin cutter gdb strace ltrace \
-    openjdk17 libxcb-devel xcb-util-wm-devel xcb-util-image-devel \
-    xcb-util-keysyms-devel xcb-util-renderutil-devel
+                           openjdk17 libxcb-devel xcb-util-wm-devel xcb-util-image-devel \
+                           xcb-util-keysyms-devel xcb-util-renderutil-devel
+
   sudo xbps-alternatives -s openjdk17
 
   # Android tools
+  echo "[*] Installing Android tools..."
   sudo xbps-install -Su -y android-tools apktool
-  sudo usermod -aG adbusers $USER
-  uv tool install ropgadget
-  uv tool install angr-management
-  uv tool install frida-tools
-  uv tool install objection
-  mise use -g github:skylot/jadx@latest
+
+  sudo groupadd -f adbusers
+  sudo usermod -aG adbusers "$CURRENT_USER"
+
+  echo "[*] Installing Python RE tools..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install ropgadget
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install angr-management
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install frida-tools
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install objection
+
+  echo "[*] Installing JADX..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g github:skylot/jadx@latest
   echo "Done..."
 }
 
@@ -406,21 +436,49 @@ install_wireless(){
 }
 
 install_network(){
-  sudo xbps-install -Su -y wireshark tcpdump arpwatch proxychains-ng netcat-openbsd libpcap-devel libseccomp-devel cargo
-  sudo usermod -aG wireshark $USER
+  echo "Installing and refreshing network tools..."
+  local CURRENT_USER="${SUDO_USER:-$USER}"
+  local USER_HOME
+  USER_HOME="$(eval echo "~$CURRENT_USER")"
 
-  # Install scapy
-  uv tool install scapy
-  SCAPY_PATH=$(uv tool dir)/scapy/bin/scapy
+  # Ensure user local binary directories exist
+  sudo -u "$CURRENT_USER" mkdir -p "$USER_HOME/.local/bin" "$USER_HOME/.cargo/bin"
+
+  # Environment paths
+  export PATH="$USER_HOME/.local/bin:$USER_HOME/.cargo/bin:$USER_HOME/.local/share/mise/shims:$PATH"
+
+  echo "[*] Installing system network tools..."
+  # Added 'net-tools' for netstat support in bettercap
+  sudo xbps-install -Su -y wireshark tcpdump arpwatch proxychains-ng netcat \
+                           libpcap-devel libseccomp-devel cargo net-tools
+
+  sudo groupadd -f wireshark
+  sudo usermod -aG wireshark "$CURRENT_USER"
+
+  # Compatibility symlink for precompiled bettercap
+  [ ! -e /usr/lib/libpcap.so.0.8 ] && sudo ln -s /usr/lib/libpcap.so /usr/lib/libpcap.so.0.8
+
+  echo "[*] Installing Scapy with cryptography and IPython shell..."
+  # Replaced pyx with ipython for auto-completion and clean shell history
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install --force scapy --with cryptography --with ipython
+  SCAPY_PATH="$USER_HOME/.local/bin/scapy"
   [ -f "$SCAPY_PATH" ] && sudo setcap cap_net_raw,cap_net_admin=eip "$SCAPY_PATH"
 
-  # Install sniffglue
-  cargo install sniffglue
-  sudo setcap cap_net_raw,cap_net_admin=eip ~/.cargo/bin/sniffglue
+  echo "[*] Installing Sniffglue..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" cargo install --force sniffglue
+  SNIFFGLUE_PATH="$USER_HOME/.cargo/bin/sniffglue"
+  [ -f "$SNIFFGLUE_PATH" ] && sudo setcap cap_net_raw,cap_net_admin=eip "$SNIFFGLUE_PATH"
 
-  #Install bettercap
-  mise use -g github:bettercap/bettercap@latest
-  sudo setcap cap_net_raw,cap_net_admin=eip $(which bettercap)
+  echo "[*] Installing Bettercap..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force github:bettercap/bettercap@latest
+
+  RAW_BETTERCAP="$(sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" which bettercap 2>/dev/null)"
+  if [ -n "$RAW_BETTERCAP" ]; then
+    REAL_BETTERCAP="$(readlink -f "$RAW_BETTERCAP")"
+    [ -f "$REAL_BETTERCAP" ] && sudo setcap cap_net_raw,cap_net_admin=eip "$REAL_BETTERCAP"
+  fi
+
+  echo "Done..."
 }
 
 install_recon_and_scanning(){
@@ -711,9 +769,9 @@ trap 'tput cnorm' EXIT
 
 OPTIONS=(
   "1. Full setup"
-  "2. Install by category"
+  "2. Select And Install"
   "3. Update"
-  "4. Select and Install"
+  "4. Test"
   "5. Exit"
 )
 
@@ -794,10 +852,10 @@ echo "  You selected: ${BOLD}${OPTIONS[$SELECTED]}${RESET}"
 
 case $SELECTED in
   0) echo "  → Full setup..." ;;
-  1) echo "  → Installing category..." ;;
-  2) echo "  → Updating...";;
-  3)
-    echo "  → Testing"
+  1)
+    echo "  → Selection Install..."
     multi_install ;;
+  2) echo "  → Updating...";;
+  3) echo "  → Testing..." ;;
   4) echo "  → Goodbye!"; exit 0;;
 esac
