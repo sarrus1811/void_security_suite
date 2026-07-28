@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
-# if [ "$EUID" -ne 0 ]; then
-#   echo "Please run as root (sudo)"
-#   exit
-# fi
+if [ "$EUID" -ne 0 ]; then
+  echo "Please run as root (sudo)"
+  exit
+fi
 
 # ----------------------
 # Sub install functions
@@ -19,6 +19,13 @@ setup_environment_paths() {
 install_nix() {
   echo "Installing and configuring Nix package manager for Void Linux..."
 
+  # 1. Ensure required base packages are installed on a fresh system
+  if command -v xbps-install &> /dev/null; then
+    echo "Ensuring base dependencies (curl, tar, xz, ca-certificates) are present..."
+    sudo xbps-install -Sy curl tar xz ca-certificates
+  fi
+
+  # 2. Stop any running nix-daemon to prevent binary lockups
   if [ -L /var/service/nix-daemon ]; then
     echo "Stopping active nix-daemon service..."
     sudo sv down nix-daemon >/dev/null 2>&1 || true
@@ -26,11 +33,13 @@ install_nix() {
   fi
   sudo pkill -9 -f nix-daemon >/dev/null 2>&1 || true
 
+  # 3. Clean up installer backup files that cause installer aborts
   echo "Cleaning up leftover backup files..."
   sudo rm -f /etc/bashrc.backup-before-nix \
              /etc/zshrc.backup-before-nix \
              /etc/bash.bashrc.backup-before-nix
 
+  # 4. Install official Nix binary if not present
   if ! command -v nix &> /dev/null; then
     echo "Installing official Nix binary..."
     sh <(curl -L https://nixos.org/nix/install) --daemon
@@ -38,6 +47,7 @@ install_nix() {
     echo "Nix binary is already installed."
   fi
 
+  # 5. Set up system-wide SSL cert environment variables for Void Linux
   echo "Setting up Void Linux SSL certificate environment..."
   sudo mkdir -p /etc/profile.d
   cat << 'EOF' | sudo tee /etc/profile.d/nix-ssl.sh > /dev/null
@@ -47,6 +57,7 @@ EOF
   sudo chmod +x /etc/profile.d/nix-ssl.sh
   . /etc/profile.d/nix-ssl.sh
 
+  # 6. Configure Void Linux runit service with Void's CA certificate bundle
   echo "Configuring runit service for nix-daemon..."
   sudo mkdir -p /etc/sv/nix-daemon
   cat << 'EOF' | sudo tee /etc/sv/nix-daemon/run > /dev/null
@@ -58,21 +69,25 @@ exec /nix/var/nix/profiles/default/bin/nix-daemon
 EOF
   sudo chmod +x /etc/sv/nix-daemon/run
 
+  # Enable service in runit
   sudo ln -sf /etc/sv/nix-daemon /var/service/
 
+  # Wait for runsvdir to initialize the 'supervise' control directory
   echo "Waiting for runit to initialize..."
   local sv_wait=10
   while [ ! -d /etc/sv/nix-daemon/supervise ] && [ $sv_wait -gt 0 ]; do
     sleep 1
-    ((sv_wait--))
+    sv_wait=$((sv_wait - 1))
   done
 
   sudo sv up nix-daemon
 
+  # 7. Source Nix profile into current shell context
   if [ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
     . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
   fi
 
+  # 8. Configure Nix features (Flakes, unfree packages, trusted users)
   echo "Configuring /etc/nix/nix.conf..."
   sudo mkdir -p /etc/nix
   cat << EOF | sudo tee /etc/nix/nix.conf > /dev/null
@@ -83,14 +98,16 @@ EOF
   mkdir -p ~/.config/nixpkgs
   echo '{ allowUnfree = true; }' > ~/.config/nixpkgs/config.nix
 
+  # Restart daemon to apply nix.conf updates
   sudo sv restart nix-daemon
 
+  # 9. Verify daemon store connection
   echo "Verifying daemon store connection..."
   local NIX_BIN="/nix/var/nix/profiles/default/bin/nix"
   local retries=15
   until "$NIX_BIN" store ping >/dev/null 2>&1 || [ $retries -eq 0 ]; do
     sleep 1
-    ((retries--))
+    retries=$((retries - 1))
   done
 
   if [ $retries -eq 0 ]; then
