@@ -16,35 +16,79 @@ setup_environment_paths() {
   export PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"
 }
 
-install_nix(){
-  echo "Installing nix package manager..."
+install_nix() {
+  echo "Installing and configuring Nix package manager for Void Linux..."
+
+  if [ -L /var/service/nix-daemon ]; then
+    echo "Stopping active nix-daemon service..."
+    sudo sv down nix-daemon >/dev/null 2>&1 || true
+    sudo rm -f /var/service/nix-daemon
+  fi
+  sudo pkill -9 -f nix-daemon >/dev/null 2>&1 || true
+
+  echo "Cleaning up leftover backup files..."
+  sudo rm -f /etc/bashrc.backup-before-nix \
+             /etc/zshrc.backup-before-nix \
+             /etc/bash.bashrc.backup-before-nix
+
   if ! command -v nix &> /dev/null; then
     echo "Installing official Nix binary..."
     sh <(curl -L https://nixos.org/nix/install) --daemon
   else
-    echo "Nix is already installed."
+    echo "Nix binary is already installed."
   fi
 
-  # Source profile to ensure PATH is loaded in the current script context
+  echo "Setting up Void Linux SSL certificate environment..."
+  sudo mkdir -p /etc/profile.d
+  cat << 'EOF' | sudo tee /etc/profile.d/nix-ssl.sh > /dev/null
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+export NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+EOF
+  sudo chmod +x /etc/profile.d/nix-ssl.sh
+  . /etc/profile.d/nix-ssl.sh
+
+  echo "Configuring runit service for nix-daemon..."
+  sudo mkdir -p /etc/sv/nix-daemon
+  cat << 'EOF' | sudo tee /etc/sv/nix-daemon/run > /dev/null
+#!/bin/sh
+exec 2>&1
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+export NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+exec /nix/var/nix/profiles/default/bin/nix-daemon
+EOF
+  sudo chmod +x /etc/sv/nix-daemon/run
+
+  sudo ln -sf /etc/sv/nix-daemon /var/service/
+
+  echo "Waiting for runit to initialize..."
+  local sv_wait=10
+  while [ ! -d /etc/sv/nix-daemon/supervise ] && [ $sv_wait -gt 0 ]; do
+    sleep 1
+    ((sv_wait--))
+  done
+
+  sudo sv up nix-daemon
+
   if [ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
     . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
   fi
 
-  # Set up Void Linux runit service for nix-daemon
-  if [ ! -d /etc/sv/nix-daemon ]; then
-    sudo mkdir -p /etc/sv/nix-daemon
-    echo -e '#!/bin/sh\nexec /nix/var/nix/profiles/default/bin/nix-daemon' | sudo tee /etc/sv/nix-daemon/run
-    sudo chmod +x /etc/sv/nix-daemon/run
-    sudo ln -s /etc/sv/nix-daemon /var/service/
-  fi
-  sudo sv up nix-daemon
+  echo "Configuring /etc/nix/nix.conf..."
+  sudo mkdir -p /etc/nix
+  cat << EOF | sudo tee /etc/nix/nix.conf > /dev/null
+experimental-features = nix-command flakes
+trusted-users = root ${USER:-$LOGNAME}
+EOF
 
-  echo "Waiting for daemon..."
+  mkdir -p ~/.config/nixpkgs
+  echo '{ allowUnfree = true; }' > ~/.config/nixpkgs/config.nix
 
-  # Use full binary path and a max 15-second retry loop to prevent infinite hanging
+  sudo sv restart nix-daemon
+
+  echo "Verifying daemon store connection..."
   local NIX_BIN="/nix/var/nix/profiles/default/bin/nix"
   local retries=15
-  until "$NIX_BIN" ping-store >/dev/null 2>&1 || [ $retries -eq 0 ]; do
+  until "$NIX_BIN" store ping >/dev/null 2>&1 || [ $retries -eq 0 ]; do
     sleep 1
     ((retries--))
   done
@@ -54,15 +98,7 @@ install_nix(){
     return 1
   fi
 
-  # Configure Nix experimental features and user privileges
-  sudo mkdir -p /etc/nix
-  echo "experimental-features = nix-command flakes" | sudo tee /etc/nix/nix.conf
-  mkdir -p ~/.config/nixpkgs
-  echo '{ allowUnfree = true; }' > ~/.config/nixpkgs/config.nix
-  echo "trusted-users = root ${USER}" | sudo tee -a /etc/nix/nix.conf
-
-  sudo sv restart nix-daemon
-  echo "Done..."
+  echo "Done! Nix is ready to use."
 }
 
 install_uv() {
