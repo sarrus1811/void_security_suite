@@ -361,21 +361,39 @@ install_container_tools(){
 
 install_cloud(){
   echo "Installing cloud tools..."
-  uv tool install prowler
-  uv tool install pacu
-  uv tool install cloudsplaining
+  local CURRENT_USER="${SUDO_USER:-$USER}"
+  local USER_HOME
+  USER_HOME="$(eval echo "~$CURRENT_USER")"
 
-  # Recon & Scanning
-  mise use -g github:trufflesecurity/trufflehog@latest
-  mise use -g github:aquasecurity/trivy@latest
+  sudo -u "$CURRENT_USER" mkdir -p "$USER_HOME/.local/bin" "$USER_HOME/.config/mise"
 
-  # Install Steampipe
-  mise use -g github:turbot/steampipe@latest
-  steampipe plugin install aws gcp azure
+  if [ -f "$USER_HOME/.nix-profile/etc/profile.d/nix.sh" ]; then
+    . "$USER_HOME/.nix-profile/etc/profile.d/nix.sh"
+  elif [ -f /nix/var/nix/profiles/default/etc/profile.d/nix.sh ]; then
+    . /nix/var/nix/profiles/default/etc/profile.d/nix.sh
+  fi
 
-  # Secrets
-  mise use -g github:zricethezav/gitleaks@latest
-  uv tool install kube-hunter
+  export PATH="$USER_HOME/.local/bin:$USER_HOME/.nix-profile/bin:$USER_HOME/.local/share/mise/shims:$PATH"
+
+  echo "[*] Installing Cloud CLIs via Nix (AWS, GCP, Azure)..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" \
+    nix-env -iA nixpkgs.awscli2 nixpkgs.google-cloud-sdk nixpkgs.azure-cli
+
+  echo "[*] Installing Python cloud tools via uv..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install --force prowler
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install --force pacu
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install --force cloudsplaining
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install --force kube-hunter
+
+  echo "[*] Installing binary recon and secrets tools via mise..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force github:trufflesecurity/trufflehog@latest
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force github:aquasecurity/trivy@latest
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force github:zricethezav/gitleaks@latest
+
+  echo "[*] Installing Steampipe & plugins..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force github:turbot/steampipe@latest
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" steampipe plugin install aws gcp azure
+
   echo "Done..."
 }
 
@@ -423,7 +441,7 @@ install_reverse(){
 }
 
 install_password(){
-  sudo xbps-install -Su -y hashcat john thc-hydra cewl
+  sudo xbps-install -Su -y hashcat john thc-hydra
 }
 
 install_wireless(){
