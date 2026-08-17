@@ -160,96 +160,153 @@ install_mise() {
   echo "Done..."
 }
 
-
 install_autopsy(){
-  echo "Installing Autopsy..."
-  sudo xbps-install -S -y sleuthkit openjdk17-jre testdisk afflib-devel libewf-devel wget unzip
+  echo "Installing Autopsy & dependencies..."
 
-  # Directory Setup
-  INSTALL_DIR="$HOME/Tools/autopsy"
-  mkdir -p "$INSTALL_DIR"
-  cd "$INSTALL_DIR"
-  URL="https://github.com/sleuthkit/autopsy/releases/download/autopsy-4.22.1/autopsy-4.22.1_v2.zip"
-  ZIP_FILE="autopsy-4.22.1_v2.zip"
+  local CURRENT_USER="${SUDO_USER:-$USER}"
+  local USER_HOME
+  USER_HOME="$(eval echo "~$CURRENT_USER")"
 
-  if [ ! -f "$ZIP_FILE" ]; then
-    echo "Downloading Autopsy 4.22.1_v2"
-    wget "$URL"
+  # 1. Install Sleuthkit, Java, and forensic format libraries via XBPS
+  echo "[*] Installing sleuthkit, OpenJDK, and disk image format libraries via xbps..."
+  sudo xbps-install -Sy sleuthkit openjdk17 testdisk afflib-devel libewf-devel wget unzip
+
+  # 2. Directory setup
+  local INSTALL_DIR="$USER_HOME/Tools/autopsy"
+  sudo -u "$CURRENT_USER" mkdir -p "$INSTALL_DIR" "$USER_HOME/.local/bin"
+
+  local AUTOPSY_VER="4.22.1"
+  local ZIP_NAME="autopsy-4.22.1_v2.zip"
+  local ZIP_URL="https://github.com/sleuthkit/autopsy/releases/download/autopsy-${AUTOPSY_VER}/${ZIP_NAME}"
+
+  if [ ! -f "$INSTALL_DIR/bin/autopsy" ]; then
+    echo "[*] Downloading Autopsy v${AUTOPSY_VER}..."
+    sudo -u "$CURRENT_USER" wget -q --show-progress -O /tmp/autopsy.zip "$ZIP_URL"
+    sudo -u "$CURRENT_USER" unzip -q /tmp/autopsy.zip -d "$USER_HOME/Tools/"
+    rm -f /tmp/autopsy.zip
+
+    # Standardize folder structure
+    if [ -d "$USER_HOME/Tools/autopsy-${AUTOPSY_VER}" ]; then
+      rm -rf "$INSTALL_DIR"
+      mv "$USER_HOME/Tools/autopsy-${AUTOPSY_VER}" "$INSTALL_DIR"
+    fi
+
+    # Run setup script with explicit JDK path
+    echo "[*] Running Autopsy unix_setup.sh..."
+    sudo -u "$CURRENT_USER" env HOME="$USER_HOME" JAVA_HOME="/usr/lib/jvm/openjdk17" \
+      bash "$INSTALL_DIR/unix_setup.sh" -j /usr/lib/jvm/openjdk17
+  else
+    echo "[*] Autopsy is already installed at $INSTALL_DIR"
   fi
 
-  echo "Extracting Autopsy"
-  unzip -q "$ZIP_FILE"
-  cd autopsy-4.22.1
+  # 3. Grant raw device read capabilities to Java for physical drive analysis
+  local JAVA_BIN="/usr/lib/jvm/openjdk17/bin/java"
+  if [ -f "$JAVA_BIN" ]; then
+    echo "[*] Setting raw disk read capabilities on OpenJDK 17 binary..."
+    sudo setcap 'cap_dac_read_search,cap_sys_admin,cap_device_read+eip' "$JAVA_BIN"
+  fi
 
-  # Unix Setup Script
-  echo "Running Autopsy Unix Setup "
-  chmod +x unix_setup.sh
-  ./unix_setup.sh
-
-  # Grant capabilities
-  JAVA_PATH=$(which java)
-  echo "Granting Network/Disk Capabilities to Java ($JAVA_PATH)"
-  sudo setcap 'cap_dac_read_search,cap_sys_admin,cap_device_read+eip' "$JAVA_PATH"
-
-  # Create Shortcuts
-  echo "Creating Launcher"
-  cat <<EOF > "$HOME/.local/bin/autopsy"
-#!/bin/bash
-cd $INSTALL_DIR/autopsy-4.22.1 && ./bin/autopsy
+  # 4. Create launcher wrapper script
+  cat << 'EOF' | sudo -u "$CURRENT_USER" tee "$USER_HOME/.local/bin/autopsy" > /dev/null
+#!/usr/bin/env bash
+export JAVA_HOME="/usr/lib/jvm/openjdk17"
+exec "$HOME/Tools/autopsy/bin/autopsy" --jdkhome "$JAVA_HOME" "$@"
 EOF
 
-  chmod +x "$HOME/.local/bin/autopsy"
-  echo "Setup Complete! Launch by typing 'autopsy' in your terminal."
+  chmod +x "$USER_HOME/.local/bin/autopsy"
+  echo "Autopsy setup complete! Launch by running 'autopsy'."
 }
+
 
 install_burp(){
   echo "Installing Burp Suite..."
   INSTALL_DIR="$HOME/Tools/BurpSuite"
   mkdir -p "$INSTALL_DIR"
 
-  if [ -f "$INSTALL_DIR/burpsuite_community" ]; then
-    echo "Burp Suite already installed."
+  # Find the actual Burp executable (BurpSuiteCommunity)
+  BURP_EXEC=$(find "$INSTALL_DIR" -maxdepth 2 -name "BurpSuiteCommunity" -type f | head -n 1)
+
+  if [ -n "$BURP_EXEC" ] && [ -x "$BURP_EXEC" ]; then
+    echo "Burp Suite is already installed at $BURP_EXEC"
   else
+    echo "Downloading installer..."
     wget -O /tmp/burp_installer.sh "https://portswigger.net/burp/releases/download?product=community&version=2026.3&type=Linux"
     chmod +x /tmp/burp_installer.sh
-    /tmp/burp_installer.sh -c -q -dir "$INSTALL_DIR"
-    # CLEANUP: Remove installer after success
+
+    echo "Running quiet installer..."
+    /tmp/burp_installer.sh -q -dir "$INSTALL_DIR"
     rm -f /tmp/burp_installer.sh
+
+    BURP_EXEC=$(find "$INSTALL_DIR" -maxdepth 2 -name "BurpSuiteCommunity" -type f | head -n 1)
   fi
 
-  BUNDLED_JAVA=$(find "$INSTALL_DIR" -name java -type f | head -n 1)
-  [ -n "$BUNDLED_JAVA" ] && sudo setcap 'cap_net_bind_service=+ep' "$BUNDLED_JAVA"
+  if [ -z "$BURP_EXEC" ]; then
+    echo "Error: Burp Suite binary could not be found in $INSTALL_DIR"
+    return 1
+  fi
 
-  ln -sf "$INSTALL_DIR/burpsuite_community" "$HOME/.local/bin/burpsuite"
-  echo "Done..."
+  # Set network capabilities on bundled JRE so Burp can bind to ports 80/443
+  BUNDLED_JAVA=$(find "$INSTALL_DIR" -name java -type f | head -n 1)
+  if [ -n "$BUNDLED_JAVA" ]; then
+    sudo setcap 'cap_net_bind_service=+ep' "$BUNDLED_JAVA"
+  fi
+
+  # Create symlink in user's PATH
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$BURP_EXEC" "$HOME/.local/bin/burpsuite"
+
+  echo "Installation complete! Run 'burpsuite' to launch."
 }
 
 install_caido(){
   echo "Installing Caido..."
-  # DEPENDENCY: Ensure fuse is installed for AppImage execution
-  sudo xbps-install -S -y fuse
 
-  VERSION="0.55.3"
+  # Check and install fuse only if not already present
+  if ! xbps-query -s fuse >/dev/null 2>&1; then
+    sudo xbps-install -Sy fuse
+  fi
+
   INSTALL_DIR="$HOME/Tools/caido"
-  mkdir -p "$INSTALL_DIR"
+  mkdir -p "$INSTALL_DIR" "$HOME/.local/bin"
 
-  # Install CLI
+  # Fetch the latest version string dynamically from Caido API
+  VERSION=$(curl -s https://caido.download/releases/latest | grep -oP '"version":\s*"\K[^"]+' || echo "0.57.1")
+  echo "Targeting Caido version: v${VERSION}"
+
+  # 1. Install CLI
   if [ ! -f "$INSTALL_DIR/caido-cli" ]; then
-    wget -O "$INSTALL_DIR/caido-cli.tar.gz" "https://github.com/caido/caido/releases/download/v${VERSION}/caido-cli-v${VERSION}-linux-x86_64.tar.gz"
-    tar -xzf "$INSTALL_DIR/caido-cli.tar.gz" -C "$INSTALL_DIR"
-    rm -f "$INSTALL_DIR/caido-cli.tar.gz" # Cleanup
-    chmod +x "$INSTALL_DIR/caido-cli"
-    sudo setcap 'cap_net_bind_service=+ep' "$INSTALL_DIR/caido-cli"
+    echo "Downloading Caido CLI..."
+    CLI_URL="https://caido.download/releases/v${VERSION}/caido-cli-v${VERSION}-linux-x86_64.tar.gz"
+
+    if wget -q --show-progress -O "$INSTALL_DIR/caido-cli.tar.gz" "$CLI_URL"; then
+      tar -xzf "$INSTALL_DIR/caido-cli.tar.gz" -C "$INSTALL_DIR"
+      rm -f "$INSTALL_DIR/caido-cli.tar.gz"
+      chmod +x "$INSTALL_DIR/caido-cli"
+
+      # Grant port binding capability to bind to low ports (< 1024)
+      sudo setcap 'cap_net_bind_service=+ep' "$INSTALL_DIR/caido-cli"
+    else
+      echo "Error downloading Caido CLI from $CLI_URL"
+      return 1
+    fi
   fi
   ln -sf "$INSTALL_DIR/caido-cli" "$HOME/.local/bin/caido-cli"
 
-  # Install Desktop
+  # 2. Install Desktop (AppImage)
   if [ ! -f "$INSTALL_DIR/caido-desktop.AppImage" ]; then
-    wget -O "$INSTALL_DIR/caido-desktop.AppImage" "https://github.com/caido/caido/releases/download/v${VERSION}/caido-desktop-v${VERSION}-linux-x86_64.AppImage"
-    chmod +x "$INSTALL_DIR/caido-desktop.AppImage"
+    echo "Downloading Caido Desktop..."
+    DESKTOP_URL="https://caido.download/releases/v${VERSION}/caido-desktop-v${VERSION}-linux-x86_64.AppImage"
+
+    if wget -q --show-progress -O "$INSTALL_DIR/caido-desktop.AppImage" "$DESKTOP_URL"; then
+      chmod +x "$INSTALL_DIR/caido-desktop.AppImage"
+    else
+      echo "Error downloading Caido Desktop AppImage from $DESKTOP_URL"
+      return 1
+    fi
   fi
   ln -sf "$INSTALL_DIR/caido-desktop.AppImage" "$HOME/.local/bin/caido"
-  echo "Done..."
+
+  echo "Caido installation complete!"
 }
 
 install_adaptix() {
@@ -283,47 +340,6 @@ install_adaptix() {
   echo "Adaptix ready."
 }
 
-install_pretender() {
-    echo "Installing pretender..."
-    export GOPATH="${GOPATH:-$HOME/.local/share/go}"
-    export PATH="$GOPATH/bin:$PATH"
-    go install github.com/RedTeamPentesting/pretender@latest
-
-    if [ -f "$GOPATH/bin/pretender" ]; then
-        sudo setcap cap_net_raw,cap_net_admin=eip "$GOPATH/bin/pretender"
-        echo "Successfully set capabilities for pretender."
-    else
-        echo "Error: pretender binary not found at $GOPATH/bin/pretender"
-        return 1
-    fi
-    echo "Done..."
-}
-
-install_sliver() {
-  echo "Installing Sliver Adversary Emulation Framework..."
-  VERSION="1.5.42" # Update this to the latest BishopFox release as needed
-  SERVER_URL="https://github.com/BishopFox/sliver/releases/download/v${VERSION}/sliver-server_linux"
-  CLIENT_URL="https://github.com/BishopFox/sliver/releases/download/v${VERSION}/sliver-client_linux"
-  INSTALL_DIR="$HOME/Tools/sliver"
-
-  mkdir -p "$INSTALL_DIR"
-  cd "$INSTALL_DIR"
-
-  wget -O sliver-server "$SERVER_URL"
-  wget -O sliver-client "$CLIENT_URL"
-  chmod +x sliver-server sliver-client
-
-  # Mingw for generating Windows-specific payloads.
-  sudo xbps-install -S -y mingw-w64-gcc
-
-  # Capabilities for listeners
-  sudo setcap 'cap_net_bind_service=+ep' "$INSTALL_DIR/sliver-server"
-
-  # Sync Launchers
-  ln -sf "$INSTALL_DIR/sliver-server" "$HOME/.local/bin/sliver-server"
-  ln -sf "$INSTALL_DIR/sliver-client" "$HOME/.local/bin/sliver-client"
-  echo "Sliver ready."
-}
 
 # ----------------------
 # Main install functions
@@ -398,13 +414,38 @@ install_cloud(){
 }
 
 install_forensics(){
-  sudo xbps-install -Su -y binwalk foremost stegseek yara exiftool
-  uv tool install volatility3
+  echo "Installing Forensic tools..."
 
-  # Install logparsring tools
-  cargo install evtx
-  # Install Autopsy
-  install_autopsy
+  local CURRENT_USER="${SUDO_USER:-$USER}"
+  local USER_HOME
+  USER_HOME="$(eval echo "~$CURRENT_USER")"
+
+  # Ensure user local binary and mise config directories exist
+  sudo -u "$CURRENT_USER" mkdir -p "$USER_HOME/.local/bin" "$USER_HOME/.config/mise"
+
+  # Export environment paths so all mise tools and shims are immediately in $PATH
+  export PATH="$USER_HOME/.local/bin:$USER_HOME/.local/share/mise/shims:$PATH"
+
+  # 1. System forensic packages via XBPS
+  echo "[*] Installing system forensic packages via xbps..."
+  sudo xbps-install -Sy binwalk foremost stegseek yara exiftool
+
+  # 2. Non-XBPS forensic tools via mise
+  echo "[*] Installing Volatility 3 via mise..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force pipx:volatility3@latest
+
+  echo "[*] Installing EVTX log parser via mise..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force cargo:evtx@latest
+
+  # 3. Install Autopsy (if defined)
+  if declare -f install_autopsy >/dev/null; then
+    echo "[*] Invoking Autopsy installer..."
+    install_autopsy
+  else
+    echo "[!] Warning: 'install_autopsy' function is not defined."
+  fi
+
+  echo "Forensics tools installation complete!"
 }
 
 install_reverse(){
@@ -467,7 +508,7 @@ install_network(){
 
   echo "[*] Installing system network tools..."
   # Added 'net-tools' for netstat support in bettercap
-  sudo xbps-install -Su -y wireshark tcpdump arpwatch proxychains-ng netcat \
+  sudo xbps-install -Su -y wireshark wireshark-qt tcpdump arpwatch proxychains-ng netcat \
                            libpcap-devel libseccomp-devel cargo net-tools
 
   sudo groupadd -f wireshark
@@ -520,71 +561,135 @@ install_recon_and_scanning(){
 }
 
 install_exploitation(){
-  uv tool install impacket
-  uv tool install responder
-  uv tool install evil-winrm
-  uv tool install netexec
-  uv tool install certipy-ad
-  uv tool install mitm6
+  echo "Installing exploitation tools..."
 
-  # Install pwntools
-  sudo xbps-install -S binutils-multiarch libelf-devel libffi-devel openssl-devel -y
-  uv tool install pwntools
+  local CURRENT_USER="${SUDO_USER:-$USER}"
+  local USER_HOME
+  USER_HOME="$(eval echo "~$CURRENT_USER")"
 
-  # Install searchsploit
-  sudo git clone https://gitlab.com/exploit-database/exploitdb.git /opt/exploitdb
+  # Ensure target directories exist
+  sudo -u "$CURRENT_USER" mkdir -p "$USER_HOME/.local/bin" "$USER_HOME/Tools" "$USER_HOME/.config/mise"
+
+  # Source Nix environment if present for current session
+  if [ -f "$USER_HOME/.nix-profile/etc/profile.d/nix.sh" ]; then
+    . "$USER_HOME/.nix-profile/etc/profile.d/nix.sh"
+  elif [ -f /nix/var/nix/profiles/default/etc/profile.d/nix.sh ]; then
+    . /nix/var/nix/profiles/default/etc/profile.d/nix.sh
+  fi
+
+  # Export environment paths so all local tools and Nix shims are in $PATH
+  export PATH="$USER_HOME/.local/bin:$USER_HOME/.nix-profile/bin:$USER_HOME/.local/share/mise/shims:$PATH"
+
+  # 1. System dependencies via XBPS (including mingw-w64 for Sliver Windows payload generation)
+  echo "[*] Installing system dependencies via xbps..."
+  sudo xbps-install -Sy binutils-multiarch libelf-devel libffi-devel openssl-devel mingw-w64-gcc
+
+  # 2. Ensure uv is managed via mise, then install Python tools
+  echo "[*] Setting up uv via mise..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force uv@latest
+
+  echo "[*] Installing Python exploitation tools via uv..."
+  local py_tools=(impacket responder evil-winrm netexec certipy-ad mitm6 pwntools)
+  for tool in "${py_tools[@]}"; do
+    sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install --force "$tool"
+  done
+
+  # 3. ExploitDB / Searchsploit
+  echo "[*] Installing ExploitDB and searchsploit..."
+  if [ ! -d "/opt/exploitdb" ]; then
+    sudo git clone --depth 1 https://gitlab.com/exploit-database/exploitdb.git /opt/exploitdb
+  else
+    (cd /opt/exploitdb && sudo git pull)
+  fi
   sudo ln -sf /opt/exploitdb/searchsploit /usr/local/bin/searchsploit
-  cp -n /opt/exploit-database/.searchsploit_rc ~/
 
-  # Install metasploit
-  nix profile add nixpkgs#metasploit
+  if [ ! -f "$USER_HOME/.searchsploit_rc" ]; then
+    sudo -u "$CURRENT_USER" cp /opt/exploitdb/.searchsploit_rc "$USER_HOME/"
+  fi
 
-  # Payloads & Utilities
-  nix profile add nixpkgs#cosign
+  # 4. Nix Packages (Metasploit, Cosign, Sliver, BloodHound, Pretender)
+  echo "[*] Installing Nix exploitation packages..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" \
+    nix-env -iA nixpkgs.metasploit nixpkgs.cosign nixpkgs.sliver nixpkgs.bloodhound nixpkgs.pretender
 
-  # SharpCollection (Syncing to Tools)
-  mkdir -p ~/Tools/SharpCollection
-  git clone --depth 1 https://github.com/Flangvik/SharpCollection.git ~/Tools/SharpCollection
+  # 5. Apply network capabilities to Nix binaries for raw socket / port binding
+  echo "[*] Granting network capabilities to Pretender and Sliver..."
+  local pretender_bin
+  pretender_bin=$(readlink -f "$USER_HOME/.nix-profile/bin/pretender" 2>/dev/null)
+  [ -f "$pretender_bin" ] && sudo setcap 'cap_net_raw,cap_net_admin=+ep' "$pretender_bin"
 
-  # --- C2 & Capability-Required Tooling ---
-  # Install Adaptix
-  install_adaptix
+  local sliver_server_bin
+  sliver_server_bin=$(readlink -f "$USER_HOME/.nix-profile/bin/sliver-server" 2>/dev/null)
+  [ -f "$sliver_server_bin" ] && sudo setcap 'cap_net_bind_service=+ep' "$sliver_server_bin"
 
-  # Install sliver
-  nix profile add nixpkgs#sliver
+  # 6. SharpCollection
+  echo "[*] Syncing SharpCollection..."
+  if [ ! -d "$USER_HOME/Tools/SharpCollection/.git" ]; then
+    sudo -u "$CURRENT_USER" git clone --depth 1 https://github.com/Flangvik/SharpCollection.git "$USER_HOME/Tools/SharpCollection"
+  else
+    (cd "$USER_HOME/Tools/SharpCollection" && sudo -u "$CURRENT_USER" git pull)
+  fi
 
-  # Install Pretender
-  nix profile add nixpkgs#bloodhound
+  # 7. Invoke Adaptix installer if function exists
+  if declare -f install_adaptix >/dev/null; then
+    echo "[*] Invoking Adaptix installer..."
+    install_adaptix
+  fi
 
-  export PATH="$HOME/.local/bin:$HOME/.nix-profile/bin:$PATH"
-  alias bloodhound='BloodHound --no-sandbox'
+  # 8. Configure persistent BloodHound alias in user's .bashrc
+  local bashrc="$USER_HOME/.bashrc"
+  grep -q "alias bloodhound=" "$bashrc" 2>/dev/null || \
+    echo "alias bloodhound='bloodhound --no-sandbox'" >> "$bashrc"
+  chown "$CURRENT_USER:$CURRENT_USER" "$bashrc" 2>/dev/null || true
+
+  echo "Exploitation tools installation complete!"
 }
 
 install_web_testing(){
-  echo "Updating system packages..."
-  sudo xbps-install -S nikto
+  echo "Installing web testing tools..."
+  local CURRENT_USER="${SUDO_USER:-$USER}"
+  local USER_HOME
+  USER_HOME="$(eval echo "~$CURRENT_USER")"
 
-  echo "Installing Python-based tools..."
-  uv tool install sqlmap
-  uv tool install xsstrike
+  # Ensure user local binary and go directories exist
+  sudo -u "$CURRENT_USER" mkdir -p "$USER_HOME/.local/bin" "$USER_HOME/.cargo/bin" "$USER_HOME/go/bin"
 
-  echo "Installing Go/Binary tools..."
-  mise use -g go@latest
-  go install github.com/ffuf/ffuf/v2@latest
-  go install github.com/OJ/gobuster/v3@latest
-  go install github.com/epi052/feroxbuster@latest
-  go install github.com/hahwul/dalfox/v3@latest
+  # Export environment paths so all Go, Cargo, uv, and Mise tools are immediately in $PATH
+  export PATH="$USER_HOME/.local/bin:$USER_HOME/.cargo/bin:$USER_HOME/go/bin:$USER_HOME/.local/share/mise/shims:$PATH"
 
-  install_burp
-  install_caido
+  echo "[*] Updating system packages & installing Nikto and sqlmap via xbps..."
+  sudo xbps-install -Su -y nikto sqlmap
 
-  local bashrc="$HOME/.bashrc"
+  echo "[*] Installing Python-based tools via uv..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install --force git+https://github.com/s0md3v/XSStrike
 
-  grep -q "alias burpsuite=" "$bashrc" || \
+  echo "[*] Setting up Go environment via mise..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force go@latest
+
+  echo "[*] Installing Go-based tools..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" GOPATH="$USER_HOME/go" go install github.com/ffuf/ffuf/v2@latest
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" GOPATH="$USER_HOME/go" go install github.com/OJ/gobuster/v3@latest
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" GOPATH="$USER_HOME/go" go install github.com/hahwul/dalfox/v3@latest
+
+  echo "[*] Installing Rust-based tools..."
+  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" cargo install --force feroxbuster
+
+  # Execute nested installer functions if defined
+  [ "$(type -t install_burp)" = "function" ] && install_burp
+  [ "$(type -t install_caido)" = "function" ] && install_caido
+
+  echo "[*] Configuring shell aliases in user's .bashrc..."
+  local bashrc="$USER_HOME/.bashrc"
+
+  grep -q "alias burpsuite=" "$bashrc" 2>/dev/null || \
     echo "alias burpsuite='LD_LIBRARY_PATH=\$HOME/Tools/BurpSuite/lib burpsuite'" >> "$bashrc"
 
-  grep -q "alias caido=" "$bashrc" || \
+  grep -q "alias caido=" "$bashrc" 2>/dev/null || \
     echo "alias caido='caido --no-sandbox'" >> "$bashrc"
+
+  chown "$CURRENT_USER:$CURRENT_USER" "$bashrc" 2>/dev/null || true
+
+  echo "Done..."
 }
 
 install_scripts(){
