@@ -290,32 +290,45 @@ install_caido(){
 }
 
 install_adaptix() {
-  echo "Installing Adaptix..."
-  sudo xbps-install -S -y go qt6-base-devel qt6-svg-devel qt6-declarative-devel gcc make cmake git
-  INSTALL_DIR="$HOME/Tools/adaptix"
-  mkdir -p "$INSTALL_DIR"
+  echo "[*] Installing Adaptix Framework..."
 
-  if [ ! -d "$INSTALL_DIR/AdaptixC2" ]; then
-    git clone --recursive https://github.com/Adaptix-Framework/AdaptixC2.git "$INSTALL_DIR/AdaptixC2"
+  sudo xbps-install -y go qt6-base-devel qt6-svg-devel qt6-declarative-devel gcc make cmake git
+
+  local INSTALL_DIR="$TARGET_HOME/Tools/adaptix"
+  as_user mkdir -p "$INSTALL_DIR"
+
+  echo " -> Fetching AdaptixC2 repository..."
+  if [ ! -d "$INSTALL_DIR/AdaptixC2/.git" ]; then
+    as_user git clone --recursive https://github.com/Adaptix-Framework/AdaptixC2.git "$INSTALL_DIR/AdaptixC2"
   else
-    cd "$INSTALL_DIR/AdaptixC2" && git pull --recurse-submodules
+    (cd "$INSTALL_DIR/AdaptixC2" && as_user git pull --recurse-submodules)
   fi
 
-  cd "$INSTALL_DIR/AdaptixC2"
+  echo " -> Compiling Teamserver..."
+  (
+    cd "$INSTALL_DIR/AdaptixC2/AdaptixServer" || return
+    as_user mkdir -p ../bin
+    as_user env GOPATH="$TARGET_HOME/go" go build -o ../bin/teamserver main.go
+  )
 
-  cd AdaptixServer
-  go build -o ../bin/teamserver main.go
-  cd ..
+  echo " -> Compiling Client (this may take a while)..."
+  (
+    cd "$INSTALL_DIR/AdaptixC2" || return
+    as_user mkdir -p build
+    cd build || return
+    as_user cmake ..
+    as_user make -j$(nproc)
+    as_user cp AdaptixClient ../bin/
+  )
 
-  mkdir -p build && cd build
-  cmake .. && make -j$(nproc)
-  cp AdaptixClient ../bin/
-  cd ..
+  echo " -> Setting capabilities and linking..."
+  sudo setcap 'cap_net_bind_service=+ep' "$INSTALL_DIR/AdaptixC2/bin/teamserver"
 
-  sudo setcap 'cap_net_bind_service=+ep' bin/teamserver
-  ln -sf "$INSTALL_DIR/AdaptixC2/bin/teamserver" "$HOME/.local/bin/adaptix-server"
-  ln -sf "$INSTALL_DIR/AdaptixC2/bin/AdaptixClient" "$HOME/.local/bin/adaptix-client"
-  echo "Adaptix ready."
+  as_user mkdir -p "$TARGET_HOME/.local/bin"
+  as_user ln -sf "$INSTALL_DIR/AdaptixC2/bin/teamserver" "$TARGET_HOME/.local/bin/adaptix-server"
+  as_user ln -sf "$INSTALL_DIR/AdaptixC2/bin/AdaptixClient" "$TARGET_HOME/.local/bin/adaptix-client"
+
+  echo "[+] Adaptix installed successfully."
 }
 
 # Main install functions
@@ -524,32 +537,21 @@ install_recon_and_scanning(){
 install_exploitation(){
   echo "Installing exploitation tools..."
 
-  local CURRENT_USER="${SUDO_USER:-$USER}"
-  local USER_HOME
-  USER_HOME="$(eval echo "~$CURRENT_USER")"
+  as_user mkdir -p "$TARGET_HOME/.local/bin" "$TARGET_HOME/Tools" "$TARGET_HOME/.config/mise"
 
-  sudo -u "$CURRENT_USER" mkdir -p "$USER_HOME/.local/bin" "$USER_HOME/Tools" "$USER_HOME/.config/mise"
-
-  if [ -f "$USER_HOME/.nix-profile/etc/profile.d/nix.sh" ]; then
-    . "$USER_HOME/.nix-profile/etc/profile.d/nix.sh"
-  elif [ -f /nix/var/nix/profiles/default/etc/profile.d/nix.sh ]; then
-    . /nix/var/nix/profiles/default/etc/profile.d/nix.sh
-  fi
-
-  export PATH="$USER_HOME/.local/bin:$USER_HOME/.nix-profile/bin:$USER_HOME/.local/share/mise/shims:$PATH"
-
-
-  echo "[*] Installing dependencies..."
+  echo "[*] Installing system dependencies..."
   sudo xbps-install -Sy binutils-multiarch libelf-devel libffi-devel openssl-devel mingw-w64-gcc
 
   echo "[*] Setting up uv via mise..."
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force uv@latest
+  mise_user use -g --force uv@latest
 
   echo "[*] Installing Python exploitation tools via uv..."
-  local py_tools=(impacket responder evil-winrm netexec certipy-ad mitm6 pwntools)
+  local py_tools=(impacket responder certipy-ad mitm6 pwntools)
   for tool in "${py_tools[@]}"; do
-    sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install --force "$tool"
+    uv_user tool install --force "$tool"
   done
+
+  uv_user tool install --force git+https://github.com/Pennyw0rth/NetExec
 
   echo "[*] Installing ExploitDB and searchsploit..."
   if [ ! -d "/opt/exploitdb" ]; then
@@ -559,66 +561,77 @@ install_exploitation(){
   fi
   sudo ln -sf /opt/exploitdb/searchsploit /usr/local/bin/searchsploit
 
-  if [ ! -f "$USER_HOME/.searchsploit_rc" ]; then
-    sudo -u "$CURRENT_USER" cp /opt/exploitdb/.searchsploit_rc "$USER_HOME/"
+  if [ ! -f "$TARGET_HOME/.searchsploit_rc" ]; then
+    as_user cp /opt/exploitdb/.searchsploit_rc "$TARGET_HOME/"
   fi
 
   echo "[*] Installing Nix exploitation packages..."
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" \
-    nix-env -iA nixpkgs.metasploit nixpkgs.cosign nixpkgs.sliver nixpkgs.bloodhound nixpkgs.pretender
+  local nix_pkgs=(metasploit cosign sliver-c2 bloodhound pretender evil-winrm)
+
+  for pkg in "${nix_pkgs[@]}"; do
+    echo " -> Installing $pkg..."
+    nix_env_user -iA "nixpkgs.$pkg" || echo -e "\e[31m[!] Failed to install $pkg (skipping)\e[0m"
+  done
 
   echo "[*] Granting network capabilities to Pretender and Sliver..."
   local pretender_bin
-  pretender_bin=$(readlink -f "$USER_HOME/.nix-profile/bin/pretender" 2>/dev/null)
-  [ -f "$pretender_bin" ] && sudo setcap 'cap_net_raw,cap_net_admin=+ep' "$pretender_bin"
+  pretender_bin=$(readlink -f "$TARGET_HOME/.nix-profile/bin/pretender" 2>/dev/null)
+  [ -n "$pretender_bin" ] && sudo setcap 'cap_net_raw,cap_net_admin=+ep' "$pretender_bin"
 
   local sliver_server_bin
-  sliver_server_bin=$(readlink -f "$USER_HOME/.nix-profile/bin/sliver-server" 2>/dev/null)
-  [ -f "$sliver_server_bin" ] && sudo setcap 'cap_net_bind_service=+ep' "$sliver_server_bin"
+  sliver_server_bin=$(readlink -f "$TARGET_HOME/.nix-profile/bin/sliver-server" 2>/dev/null)
+  [ -n "$sliver_server_bin" ] && sudo setcap 'cap_net_bind_service=+ep' "$sliver_server_bin"
 
   echo "[*] Syncing SharpCollection..."
-  if [ ! -d "$USER_HOME/Tools/SharpCollection/.git" ]; then
-    sudo -u "$CURRENT_USER" git clone --depth 1 https://github.com/Flangvik/SharpCollection.git "$USER_HOME/Tools/SharpCollection"
+  if [ ! -d "$TARGET_HOME/Tools/SharpCollection/.git" ]; then
+    as_user git clone --depth 1 https://github.com/Flangvik/SharpCollection.git "$TARGET_HOME/Tools/SharpCollection"
   else
-    (cd "$USER_HOME/Tools/SharpCollection" && sudo -u "$CURRENT_USER" git pull)
+    (cd "$TARGET_HOME/Tools/SharpCollection" && as_user git pull)
   fi
 
-  if declare -f install_adaptix >/dev/null; then
-    echo "[*] Invoking Adaptix installer..."
-    install_adaptix
-  fi
-
-  local bashrc="$USER_HOME/.bashrc"
+  local bashrc="$TARGET_HOME/.bashrc"
   grep -q "alias bloodhound=" "$bashrc" 2>/dev/null || \
     echo "alias bloodhound='bloodhound --no-sandbox'" >> "$bashrc"
-  chown "$CURRENT_USER:$CURRENT_USER" "$bashrc" 2>/dev/null || true
 
   echo "Exploitation tools installation complete!"
 }
 
+install_c2(){
+  echo "Installing C2 tools..."
+  echo "Installing Command and Control (C2) Frameworks..."
+
+  as_user mkdir -p "$TARGET_HOME/.local/bin" "$TARGET_HOME/Tools"
+
+  install_adaptix
+
+  # install_sliver
+  # install_mythic
+  # install_cobaltstrike
+
+  echo "Done..."
+}
+
 install_web_testing(){
   echo "Installing web testing tools..."
-  local CURRENT_USER="${SUDO_USER:-$USER}"
-  local USER_HOME
-  USER_HOME="$(eval echo "~$CURRENT_USER")"
 
-  sudo -u "$CURRENT_USER" mkdir -p "$USER_HOME/.local/bin" "$USER_HOME/.cargo/bin" "$USER_HOME/go/bin"
-
-  export PATH="$USER_HOME/.local/bin:$USER_HOME/.cargo/bin:$USER_HOME/go/bin:$USER_HOME/.local/share/mise/shims:$PATH"
+  as_user mkdir -p "$TARGET_HOME/.local/bin" "$TARGET_HOME/.cargo/bin" "$TARGET_HOME/go/bin"
 
   sudo xbps-install -Su -y nikto sqlmap
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install --force git+https://github.com/s0md3v/XSStrike
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force go@latest
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" GOPATH="$USER_HOME/go" go install github.com/ffuf/ffuf/v2@latest
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" GOPATH="$USER_HOME/go" go install github.com/OJ/gobuster/v3@latest
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" GOPATH="$USER_HOME/go" go install github.com/hahwul/dalfox/v3@latest
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" cargo install --force feroxbuster
+
+  uv_user tool install --force git+https://github.com/s0md3v/XSStrike
+  mise_user use -g --force go@latest
+
+  as_user env GOPATH="$TARGET_HOME/go" go install github.com/ffuf/ffuf/v2@latest
+  as_user env GOPATH="$TARGET_HOME/go" go install github.com/OJ/gobuster/v3@latest
+  as_user env GOPATH="$TARGET_HOME/go" go install github.com/hahwul/dalfox/v3@latest
+
+  as_user cargo install --force feroxbuster
 
   [ "$(type -t install_burp)" = "function" ] && install_burp
   [ "$(type -t install_caido)" = "function" ] && install_caido
 
   echo "[*] Configuring shell aliases in user's .bashrc..."
-  local bashrc="$USER_HOME/.bashrc"
+  local bashrc="$TARGET_HOME/.bashrc"
 
   grep -q "alias burpsuite=" "$bashrc" 2>/dev/null || \
     echo "alias burpsuite='LD_LIBRARY_PATH=\$HOME/Tools/BurpSuite/lib burpsuite'" >> "$bashrc"
@@ -626,9 +639,7 @@ install_web_testing(){
   grep -q "alias caido=" "$bashrc" 2>/dev/null || \
     echo "alias caido='caido --no-sandbox'" >> "$bashrc"
 
-  chown "$CURRENT_USER:$CURRENT_USER" "$bashrc" 2>/dev/null || true
-
-  echo "Done..."
+  echo "Web Testing installation complete!"
 }
 
 install_scripts(){
@@ -680,6 +691,7 @@ full_install() {
   echo "===================================================="
 }
 
+
 multi_install() {
   local funcs=(
     "install_utilities"
@@ -695,6 +707,7 @@ multi_install() {
     "install_forensics"
     "install_reverse"
     "install_cloud"
+    "install_c2"
   )
 
   local labels=(
@@ -711,6 +724,7 @@ multi_install() {
     "Digital Forensics"
     "Reverse Engineering"
     "Cloud Security Tools"
+    "C2"
   )
 
   local count=${#funcs[@]}
@@ -829,7 +843,8 @@ export TARGET_USER="${SUDO_USER:-$USER}"
 export TARGET_HOME="$(eval echo "~$TARGET_USER")"
 
 as_user() {
-  sudo -u "$TARGET_USER" env HOME="$TARGET_HOME" PATH="$TARGET_HOME/.local/bin:$PATH" "$@"
+  local user_path="$TARGET_HOME/.local/bin:$TARGET_HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$TARGET_HOME/.local/share/mise/shims:$TARGET_HOME/.cargo/bin:$TARGET_HOME/go/bin:$PATH"
+  sudo -u "$TARGET_USER" env HOME="$TARGET_HOME" PATH="$user_path" "$@"
 }
 
 mise_user() {
@@ -840,10 +855,9 @@ uv_user() {
   as_user "$TARGET_HOME/.local/bin/uv" "$@"
 }
 
-nix_user() {
-  as_user /nix/var/nix/profiles/default/bin/nix "$@"
+nix_env_user() {
+  as_user nix-env "$@"
 }
-
 trap 'tput cnorm' EXIT
 
 OPTIONS=(
