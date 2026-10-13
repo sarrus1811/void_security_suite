@@ -119,6 +119,8 @@ EOF
   fi
 
   echo "Done..."
+  echo -e "\n\e[1;33m[!] IMPORTANT: Nix has been installed, but your current terminal doesn't know about it yet.\e[0m"
+  echo -e "\e[1;33m[!] Run 'source ~/.bashrc' or open a new terminal window to start using Nix.\e[0m\n"
 }
 
 install_uv() {
@@ -494,19 +496,29 @@ install_network(){
 }
 
 install_recon_and_scanning(){
+  echo "Installing non-free repository and scanning tools..."
+  sudo xbps-install -y void-repo-nonfree
   sudo xbps-install -Su -y nmap masscan
 
-  mise use -g github:projectdiscovery/subfinder@latest
-  mise use -g github:projectdiscovery/httpx@latest
-  mise use -g github:projectdiscovery/dnsx@latest
-  mise use -g github:projectdiscovery/nuclei@latest
-  mise use -g github:projectdiscovery/naabu@latest
-  mise use -g github:projectdiscovery/cvemap@latest
-  sudo setcap 'cap_net_raw,cap_net_admin+eip' $(which naabu)
+  echo "Installing ProjectDiscovery tools via mise..."
+  mise_user use -g github:projectdiscovery/subfinder@latest
+  mise_user use -g github:projectdiscovery/httpx@latest
+  mise_user use -g github:projectdiscovery/dnsx@latest
+  mise_user use -g github:projectdiscovery/nuclei@latest
+  mise_user use -g github:projectdiscovery/naabu@latest
+  mise_user use -g github:projectdiscovery/cvemap@latest
 
-  mise use -g github:epi052/feroxbuster@latest
-  mise use -g github:owasp-amass/amass@latest
-  mkdir -p ~/Documents/Engagements/_amass_db
+  local NAABU_BIN
+  NAABU_BIN=$(mise_user which naabu)
+
+  echo "Setting network capabilities for Naabu at: $NAABU_BIN"
+  sudo setcap 'cap_net_raw,cap_net_admin+eip' "$NAABU_BIN"
+
+  echo "Installing remaining wordlist and recon tools..."
+  mise_user use -g github:epi052/feroxbuster@latest
+  mise_user use -g github:owasp-amass/amass@latest
+
+  as_user mkdir -p "$TARGET_HOME/Documents/Engagements/_amass_db"
 }
 
 install_exploitation(){
@@ -668,8 +680,6 @@ full_install() {
   echo "===================================================="
 }
 
-#!/usr/bin/env bash
-
 multi_install() {
   local funcs=(
     "install_utilities"
@@ -688,17 +698,17 @@ multi_install() {
   )
 
   local labels=(
-    "Basic Utilities"
-    "Development Tools"
-    "Networking Utilities"
+    "Utilities"
+    "Development"
+    "Networking"
     "Container Tools (Incus / Podman)"
     "Reconnaissance & Scanning"
-    "Exploitation Frameworks"
-    "Wireless Security Tools"
+    "Exploitation"
+    "Wireless"
     "Web Application Testing"
     "Custom Scripts & Wordlists"
     "Password & Hash Cracking"
-    "Digital Forensics Tools"
+    "Digital Forensics"
     "Reverse Engineering"
     "Cloud Security Tools"
   )
@@ -814,6 +824,26 @@ test_function(){
   install_exploitation
 }
 
+# --- Global User & Environment Helpers ---
+export TARGET_USER="${SUDO_USER:-$USER}"
+export TARGET_HOME="$(eval echo "~$TARGET_USER")"
+
+as_user() {
+  sudo -u "$TARGET_USER" env HOME="$TARGET_HOME" PATH="$TARGET_HOME/.local/bin:$PATH" "$@"
+}
+
+mise_user() {
+  as_user "$TARGET_HOME/.local/bin/mise" "$@"
+}
+
+uv_user() {
+  as_user "$TARGET_HOME/.local/bin/uv" "$@"
+}
+
+nix_user() {
+  as_user /nix/var/nix/profiles/default/bin/nix "$@"
+}
+
 trap 'tput cnorm' EXIT
 
 OPTIONS=(
@@ -887,7 +917,8 @@ while true; do
   fi
 done
 
-printf "\n"
+move_to_top
+printf "${ESC}[J"
 
 tput cnorm
 
