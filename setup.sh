@@ -329,21 +329,21 @@ install_utilities() {
 
 install_container_tools(){
   set -e
-  sudo xbps-install -Su -y docker docker-compose podman incus shadow
+  sudo xbps-install -Sy docker docker-compose podman incus shadow
 
   [ ! -L /var/service/containerd ] && sudo ln -s /etc/sv/containerd /var/service/
   [ ! -L /var/service/docker ] && sudo ln -s /etc/sv/docker /var/service/
-  sudo usermod -aG docker "${USER}"
+  sudo usermod -aG docker "${TARGET_USER}"
 
-  if ! grep -q "${USER}" /etc/subuid; then
-    echo "Adding ${USER} to /etc/subuid and /etc/subgid..."
-    echo "${USER}:100000:65536" | sudo tee -a /etc/subuid
-    echo "${USER}:100000:65536" | sudo tee -a /etc/subgid
+  if ! grep -q "${TARGET_USER}" /etc/subuid; then
+    echo "Adding ${TARGET_USER} to /etc/subuid and /etc/subgid..."
+    echo "${TARGET_USER}:100000:65536" | sudo tee -a /etc/subuid
+    echo "${TARGET_USER}:100000:65536" | sudo tee -a /etc/subgid
   fi
 
   [ ! -L /var/service/incus ] && sudo ln -s /etc/sv/incus /var/service/
   [ ! -L /var/service/incus-user ] && sudo ln -s /etc/sv/incus-user /var/service/
-  sudo usermod -aG _incus-admin ${USER}
+  sudo usermod -aG _incus-admin "${TARGET_USER}"
 }
 
 install_cloud(){
