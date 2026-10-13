@@ -154,74 +154,25 @@ install_mise() {
   echo "Done..."
 }
 
-install_autopsy(){
-  echo "Installing Autopsy & dependencies..."
-
-  local CURRENT_USER="${SUDO_USER:-$USER}"
-  local USER_HOME
-  USER_HOME="$(eval echo "~$CURRENT_USER")"
-
-  echo "[*] Installing sleuthkit, OpenJDK, and disk image format libraries via xbps..."
-  sudo xbps-install -Sy sleuthkit openjdk17 testdisk afflib-devel libewf-devel wget unzip
-
-  local INSTALL_DIR="$USER_HOME/Tools/autopsy"
-  sudo -u "$CURRENT_USER" mkdir -p "$INSTALL_DIR" "$USER_HOME/.local/bin"
-
-  local AUTOPSY_VER="4.22.1"
-  local ZIP_NAME="autopsy-4.22.1_v2.zip"
-  local ZIP_URL="https://github.com/sleuthkit/autopsy/releases/download/autopsy-${AUTOPSY_VER}/${ZIP_NAME}"
-
-  if [ ! -f "$INSTALL_DIR/bin/autopsy" ]; then
-    echo "[*] Downloading Autopsy v${AUTOPSY_VER}..."
-    sudo -u "$CURRENT_USER" wget -q --show-progress -O /tmp/autopsy.zip "$ZIP_URL"
-    sudo -u "$CURRENT_USER" unzip -q /tmp/autopsy.zip -d "$USER_HOME/Tools/"
-    rm -f /tmp/autopsy.zip
-
-    if [ -d "$USER_HOME/Tools/autopsy-${AUTOPSY_VER}" ]; then
-      rm -rf "$INSTALL_DIR"
-      mv "$USER_HOME/Tools/autopsy-${AUTOPSY_VER}" "$INSTALL_DIR"
-    fi
-
-    echo "[*] Running Autopsy unix_setup.sh..."
-    sudo -u "$CURRENT_USER" env HOME="$USER_HOME" JAVA_HOME="/usr/lib/jvm/openjdk17" \
-      bash "$INSTALL_DIR/unix_setup.sh" -j /usr/lib/jvm/openjdk17
-  else
-    echo "[*] Autopsy is already installed at $INSTALL_DIR"
-  fi
-
-  local JAVA_BIN="/usr/lib/jvm/openjdk17/bin/java"
-  if [ -f "$JAVA_BIN" ]; then
-    echo "[*] Setting raw disk read capabilities on OpenJDK 17 binary..."
-    sudo setcap 'cap_dac_read_search,cap_sys_admin,cap_device_read+eip' "$JAVA_BIN"
-  fi
-
-  cat << 'EOF' | sudo -u "$CURRENT_USER" tee "$USER_HOME/.local/bin/autopsy" > /dev/null
-#!/usr/bin/env bash
-export JAVA_HOME="/usr/lib/jvm/openjdk17"
-exec "$HOME/Tools/autopsy/bin/autopsy" --jdkhome "$JAVA_HOME" "$@"
-EOF
-
-  chmod +x "$USER_HOME/.local/bin/autopsy"
-  echo "Autopsy setup complete! Launch by running 'autopsy'."
-}
-
-
 install_burp(){
   echo "Installing Burp Suite..."
-  INSTALL_DIR="$HOME/Tools/BurpSuite"
-  mkdir -p "$INSTALL_DIR"
 
-  BURP_EXEC=$(find "$INSTALL_DIR" -maxdepth 2 -name "BurpSuiteCommunity" -type f | head -n 1)
+  echo "Installing system Java dependency..."
+  sudo xbps-install -Sy openjdk21
+  local INSTALL_DIR="$TARGET_HOME/Tools/BurpSuite"
+  as_user mkdir -p "$INSTALL_DIR"
+
+  local BURP_EXEC=$(find "$INSTALL_DIR" -maxdepth 2 -name "BurpSuiteCommunity" -type f | head -n 1)
 
   if [ -n "$BURP_EXEC" ] && [ -x "$BURP_EXEC" ]; then
     echo "Burp Suite is already installed at $BURP_EXEC"
   else
     echo "Downloading installer..."
-    wget -O /tmp/burp_installer.sh "https://portswigger.net/burp/releases/download?product=community&version=2026.3&type=Linux"
+    as_user wget -q --show-progress -O /tmp/burp_installer.sh "https://portswigger.net/burp/releases/download?product=community&version=2026.3&type=Linux"
     chmod +x /tmp/burp_installer.sh
 
-    echo "Running quiet installer..."
-    /tmp/burp_installer.sh -q -dir "$INSTALL_DIR"
+    echo "Running quiet installer as standard user..."
+    as_user /tmp/burp_installer.sh -q -dir "$INSTALL_DIR"
     rm -f /tmp/burp_installer.sh
 
     BURP_EXEC=$(find "$INSTALL_DIR" -maxdepth 2 -name "BurpSuiteCommunity" -type f | head -n 1)
@@ -232,15 +183,23 @@ install_burp(){
     return 1
   fi
 
-  BUNDLED_JAVA=$(find "$INSTALL_DIR" -name java -type f | head -n 1)
+  local BUNDLED_JAVA=$(find "$INSTALL_DIR" -name java -type f | head -n 1)
   if [ -n "$BUNDLED_JAVA" ]; then
     sudo setcap 'cap_net_bind_service=+ep' "$BUNDLED_JAVA"
   fi
 
-  mkdir -p "$HOME/.local/bin"
-  ln -sf "$BURP_EXEC" "$HOME/.local/bin/burpsuite"
+  as_user rm -f "$TARGET_HOME/.local/bin/burpsuite"
 
-  echo "Installation complete! Run 'burpsuite' to launch."
+  # Create a wrapper script that explicitly sets the Java path
+  cat <<EOF | as_user tee "$TARGET_HOME/.local/bin/burpsuite" > /dev/null
+#!/bin/bash
+export INSTALL4J_JAVA_HOME="$INSTALL_DIR/jre"
+exec "$BURP_EXEC" "\$@"
+EOF
+
+  as_user chmod +x "$TARGET_HOME/.local/bin/burpsuite"
+
+  echo "Burp Suite installation complete! Run 'burpsuite' to launch."
 }
 
 install_caido(){
@@ -250,20 +209,21 @@ install_caido(){
     sudo xbps-install -Sy fuse
   fi
 
-  INSTALL_DIR="$HOME/Tools/caido"
-  mkdir -p "$INSTALL_DIR" "$HOME/.local/bin"
+  # NOTE: Using TARGET_HOME here so it goes to /home/void!
+  local INSTALL_DIR="$TARGET_HOME/Tools/caido"
+  as_user mkdir -p "$INSTALL_DIR" "$TARGET_HOME/.local/bin"
 
-  VERSION=$(curl -s https://caido.download/releases/latest | grep -oP '"version":\s*"\K[^"]+' || echo "0.57.1")
+  local VERSION=$(curl -s https://caido.download/releases/latest | grep -oP '"version":\s*"\K[^"]+' || echo "0.58.3")
   echo "Targeting Caido version: v${VERSION}"
 
   if [ ! -f "$INSTALL_DIR/caido-cli" ]; then
     echo "Downloading Caido CLI..."
-    CLI_URL="https://caido.download/releases/v${VERSION}/caido-cli-v${VERSION}-linux-x86_64.tar.gz"
+    local CLI_URL="https://caido.download/releases/v${VERSION}/caido-cli-v${VERSION}-linux-x86_64.tar.gz"
 
-    if wget -q --show-progress -O "$INSTALL_DIR/caido-cli.tar.gz" "$CLI_URL"; then
-      tar -xzf "$INSTALL_DIR/caido-cli.tar.gz" -C "$INSTALL_DIR"
-      rm -f "$INSTALL_DIR/caido-cli.tar.gz"
-      chmod +x "$INSTALL_DIR/caido-cli"
+    if as_user wget -q --show-progress -O "$INSTALL_DIR/caido-cli.tar.gz" "$CLI_URL"; then
+      as_user tar -xzf "$INSTALL_DIR/caido-cli.tar.gz" -C "$INSTALL_DIR"
+      as_user rm -f "$INSTALL_DIR/caido-cli.tar.gz"
+      as_user chmod +x "$INSTALL_DIR/caido-cli"
 
       sudo setcap 'cap_net_bind_service=+ep' "$INSTALL_DIR/caido-cli"
     else
@@ -271,20 +231,20 @@ install_caido(){
       return 1
     fi
   fi
-  ln -sf "$INSTALL_DIR/caido-cli" "$HOME/.local/bin/caido-cli"
+  as_user ln -sf "$INSTALL_DIR/caido-cli" "$TARGET_HOME/.local/bin/caido-cli"
 
   if [ ! -f "$INSTALL_DIR/caido-desktop.AppImage" ]; then
     echo "Downloading Caido Desktop..."
-    DESKTOP_URL="https://caido.download/releases/v${VERSION}/caido-desktop-v${VERSION}-linux-x86_64.AppImage"
+    local DESKTOP_URL="https://caido.download/releases/v${VERSION}/caido-desktop-v${VERSION}-linux-x86_64.AppImage"
 
-    if wget -q --show-progress -O "$INSTALL_DIR/caido-desktop.AppImage" "$DESKTOP_URL"; then
-      chmod +x "$INSTALL_DIR/caido-desktop.AppImage"
+    if as_user wget -q --show-progress -O "$INSTALL_DIR/caido-desktop.AppImage" "$DESKTOP_URL"; then
+      as_user chmod +x "$INSTALL_DIR/caido-desktop.AppImage"
     else
       echo "Error downloading Caido Desktop AppImage from $DESKTOP_URL"
       return 1
     fi
   fi
-  ln -sf "$INSTALL_DIR/caido-desktop.AppImage" "$HOME/.local/bin/caido"
+  as_user ln -sf "$INSTALL_DIR/caido-desktop.AppImage" "$TARGET_HOME/.local/bin/caido"
 
   echo "Caido installation complete!"
 }
@@ -331,8 +291,35 @@ install_adaptix() {
   echo "[+] Adaptix installed successfully."
 }
 
+install_sliver() {
+  echo "[*] Installing Sliver C2 Framework..."
+
+  local INSTALL_DIR="$TARGET_HOME/Tools/sliver"
+  as_user mkdir -p "$INSTALL_DIR" "$TARGET_HOME/.local/bin"
+
+  echo " -> Downloading latest Sliver binaries from GitHub..."
+  local SERVER_URL="https://github.com/BishopFox/sliver/releases/latest/download/sliver-server_linux"
+  local CLIENT_URL="https://github.com/BishopFox/sliver/releases/latest/download/sliver-client_linux"
+
+  as_user curl -# -L -o "$INSTALL_DIR/sliver-server" "$SERVER_URL"
+  as_user curl -# -L -o "$INSTALL_DIR/sliver-client" "$CLIENT_URL"
+
+  echo " -> Setting permissions and capabilities..."
+  as_user chmod +x "$INSTALL_DIR/sliver-server" "$INSTALL_DIR/sliver-client"
+
+  sudo setcap 'cap_net_bind_service=+ep' "$INSTALL_DIR/sliver-server"
+
+  echo " -> Creating symlinks..."
+  as_user ln -sf "$INSTALL_DIR/sliver-server" "$TARGET_HOME/.local/bin/sliver-server"
+  as_user ln -sf "$INSTALL_DIR/sliver-client" "$TARGET_HOME/.local/bin/sliver-client"
+  as_user ln -sf "$INSTALL_DIR/sliver-client" "$TARGET_HOME/.local/bin/sliver"
+
+  echo "[+] Sliver installed successfully."
+}
+
 # Main install functions
 install_utilities() {
+  sudo xbps-install -u xbps
   sudo xbps-install -Su -y xtools terminator tmux fzf bat ripgrep chromium tor proxychains-ng socat wget git openvpn openssl jq yq bleachbit
   install_mise
   install_uv
@@ -361,112 +348,141 @@ install_container_tools(){
 
 install_cloud(){
   echo "Installing cloud tools..."
-  local CURRENT_USER="${SUDO_USER:-$USER}"
-  local USER_HOME
-  USER_HOME="$(eval echo "~$CURRENT_USER")"
 
-  sudo -u "$CURRENT_USER" mkdir -p "$USER_HOME/.local/bin" "$USER_HOME/.config/mise"
+  as_user mkdir -p "$TARGET_HOME/.local/bin" "$TARGET_HOME/.config/mise"
 
-  if [ -f "$USER_HOME/.nix-profile/etc/profile.d/nix.sh" ]; then
-    . "$USER_HOME/.nix-profile/etc/profile.d/nix.sh"
+  if [ -f "$TARGET_HOME/.nix-profile/etc/profile.d/nix.sh" ]; then
+    . "$TARGET_HOME/.nix-profile/etc/profile.d/nix.sh"
   elif [ -f /nix/var/nix/profiles/default/etc/profile.d/nix.sh ]; then
     . /nix/var/nix/profiles/default/etc/profile.d/nix.sh
   fi
 
-  export PATH="$USER_HOME/.local/bin:$USER_HOME/.nix-profile/bin:$USER_HOME/.local/share/mise/shims:$PATH"
+  echo "[*] Installing Cloud CLIs and Session Manager plugin via Nix..."
+  as_user nix-env -iA nixpkgs.awscli2 nixpkgs.ssm-session-manager-plugin nixpkgs.google-cloud-sdk nixpkgs.azure-cli
 
-  echo "[*] Installing Cloud CLIs via Nix (AWS, GCP, Azure)..."
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" \
-    nix-env -iA nixpkgs.awscli2 nixpkgs.google-cloud-sdk nixpkgs.azure-cli
+  echo "[*] Setting up uv via mise..."
+  mise_user use -g --force uv@latest
 
-  echo "[*] Installing Python cloud tools via uv..."
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install --force prowler
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install --force pacu
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install --force cloudsplaining
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install --force kube-hunter
+  echo "[*] Installing Python cloud security tools via uv..."
+  local cloud_py_tools=(prowler pacu cloudsplaining kube-hunter)
+  for tool in "${cloud_py_tools[@]}"; do
+    uv_user tool install --force "$tool"
+  done
 
   echo "[*] Installing binary recon and secrets tools via mise..."
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force github:trufflesecurity/trufflehog@latest
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force github:aquasecurity/trivy@latest
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force github:zricethezav/gitleaks@latest
+  mise_user use -g --force github:trufflesecurity/trufflehog@latest
+  mise_user use -g --force github:aquasecurity/trivy@latest
+  mise_user use -g --force github:zricethezav/gitleaks@latest
 
-  echo "[*] Installing Steampipe & plugins..."
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force github:turbot/steampipe@latest
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" steampipe plugin install aws gcp azure
+  echo "[*] Installing Steampipe & plugins via mise..."
+  mise_user use -g --force github:turbot/steampipe@latest
+  as_user steampipe plugin install aws gcp azure
 
-  echo "Done..."
+  echo "Cloud tools installation complete!"
 }
 
 install_forensics(){
   echo "Installing Forensic tools..."
 
-  local CURRENT_USER="${SUDO_USER:-$USER}"
-  local USER_HOME
-  USER_HOME="$(eval echo "~$CURRENT_USER")"
+  as_user mkdir -p "$TARGET_HOME/.local/bin" "$TARGET_HOME/.config/mise"
 
-  sudo -u "$CURRENT_USER" mkdir -p "$USER_HOME/.local/bin" "$USER_HOME/.config/mise"
+  echo "[*] Installing core system forensics packages..."
+  sudo xbps-install -Sy binwalk foremost stegseek yara exiftool sleuthkit testdisk poppler-utils
 
-  export PATH="$USER_HOME/.local/bin:$USER_HOME/.local/share/mise/shims:$PATH"
+  echo "[*] Setting up uv and cargo dependencies..."
+  mise_user use -g --force uv@latest
 
-  sudo xbps-install -Sy binwalk foremost stegseek yara exiftool
+  echo "[*] Installing Python DFIR tools via uv..."
+  uv_user tool install --force volatility3
+  uv_user tool install --force git+https://github.com/decalage2/ViperMonkey.git
 
-  echo "[*] Installing Volatility 3..."
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force pipx:volatility3@latest
-
-  echo "[*] Installing EVTX log parser via mise..."
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g --force cargo:evtx@latest
-
-  if declare -f install_autopsy >/dev/null; then
-    echo "[*] Invoking Autopsy installer..."
-    install_autopsy
-  else
-    echo "[!] Warning: 'install_autopsy' function is not defined."
-  fi
+  echo "[*] Installing Rust-based log analysis tools via cargo..."
+  as_user cargo install --force evtx
+  as_user cargo install --force chainsaw-cli
 
   echo "Forensics tools installation complete!"
 }
 
 install_reverse(){
   echo "Installing reverse engineering tools..."
-  local CURRENT_USER="${SUDO_USER:-$USER}"
-  local USER_HOME
-  USER_HOME="$(eval echo "~$CURRENT_USER")"
 
-  export PATH="$USER_HOME/.local/bin:$USER_HOME/.local/share/mise/bin:$PATH"
+  as_user mkdir -p "$TARGET_HOME/.local/bin" "$TARGET_HOME/.config/mise"
 
-  sudo xbps-install -Su -y xxd imhex ghidra rizin cutter gdb strace ltrace \
-                           openjdk17 libxcb-devel xcb-util-wm-devel xcb-util-image-devel \
-                           xcb-util-keysyms-devel xcb-util-renderutil-devel
+  echo "[*] Installing core system RE, Android, and Ruby packages via xbps..."
+  sudo xbps-install -Sy xxd imhex ghidra binwalk rizin cutter gdb strace ltrace \
+                    openjdk17 libxcb-devel xcb-util-wm-devel xcb-util-image-devel \
+                    xcb-util-keysyms-devel xcb-util-renderutil-devel \
+                    android-tools apktool ruby
 
   sudo xbps-alternatives -s openjdk17
 
-  echo "[*] Installing Android tools..."
-  sudo xbps-install -Su -y android-tools apktool
-
+  echo "[*] Configuring adbusers group..."
   sudo groupadd -f adbusers
-  sudo usermod -aG adbusers "$CURRENT_USER"
+  sudo usermod -aG adbusers "$TARGET_USER"
 
-  echo "[*] Installing Python RE tools..."
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install ropgadget
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install angr-management
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install frida-tools
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" uv tool install objection
+  echo "[*] Setting up uv via mise..."
+  mise_user use -g --force uv@latest
 
-  echo "[*] Installing JADX..."
-  sudo -u "$CURRENT_USER" env HOME="$USER_HOME" PATH="$PATH" "$USER_HOME/.local/bin/mise" use -g github:skylot/jadx@latest
-  echo "Done..."
+  echo "[*] Installing Python RE, mobile security & emulation tools via uv..."
+  local py_re_tools=(ropgadget angr-management frida-tools objection qiling)
+  for tool in "${py_re_tools[@]}"; do
+    uv_user tool install --force "$tool"
+  done
+
+  echo "[*] Installing one_gadget via gem..."
+  as_user gem install --user-install one_gadget
+
+  echo "[*] Linking Ruby gem binaries to ~/.local/bin..."
+  local gem_bin_dir
+  gem_bin_dir=$(as_user ruby -e 'print File.join(Gem.user_dir, "bin")' 2>/dev/null)
+  if [ -d "$gem_bin_dir" ]; then
+    for bin in "$gem_bin_dir"/*; do
+      [ -f "$bin" ] && as_user ln -sf "$bin" "$TARGET_HOME/.local/bin/"
+    done
+  fi
+
+  echo "[*] Installing JADX via mise..."
+  mise_user use -g github:skylot/jadx@latest
+
+  echo "Reverse engineering tools installation complete!"
 }
 
 install_password(){
-  sudo xbps-install -Su -y hashcat john thc-hydra
+  echo "Installing Password & Hash Cracking tools..."
+
+  echo "[*] Installing core cracking packages..."
+  sudo xbps-install -Sy hashcat john thc-hydra
+
+  echo "[*] Installing Name-That-Hash (Hash identification)..."
+  as_user mkdir -p "$TARGET_HOME/.local/bin"
+  mise_user use -g --force uv@latest
+
+  uv_user tool install --force name-that-hash
+
+  echo "Password tools installation complete!"
 }
 
-install_wireless(){
-  sudo xbps-install -Su -y aircrack-ng kismet hxctools hcxdumptool
+install_wireless() {
+  echo "Installing Wireless Security Tools..."
+  as_user mkdir -p "$TARGET_HOME/Tools" "$TARGET_HOME/.local/bin"
 
-  git clone --depth 1 https://github.com/v1s1t0r1sh3r3/airgeddon.git
-  cd airgeddon
-  sudo bash airgeddon.sh
+  echo "[*] Installing core wireless packages and Airgeddon dependencies..."
+  sudo xbps-install -Sy aircrack-ng kismet hcxtools hcxdumptool xterm \
+    dnsmasq hostapd tcpdump wireshark hashcat john crunch lighttpd bettercap ettercap
+
+  local INSTALL_DIR="$TARGET_HOME/Tools/airgeddon"
+
+  echo "[*] Fetching Airgeddon..."
+  if [ ! -d "$INSTALL_DIR/.git" ]; then
+    as_user git clone --depth 1 https://github.com/v1s1t0r1sh3r3/airgeddon.git "$INSTALL_DIR"
+  else
+    (cd "$INSTALL_DIR" && as_user git pull)
+  fi
+
+  echo "[*] Linking Airgeddon to PATH..."
+  as_user ln -sf "$INSTALL_DIR/airgeddon.sh" "$TARGET_HOME/.local/bin/airgeddon"
+
+  echo "[+] Wireless tools installation complete!"
 }
 
 install_network(){
@@ -542,8 +558,9 @@ install_exploitation(){
   echo "[*] Installing system dependencies..."
   sudo xbps-install -Sy binutils-multiarch libelf-devel libffi-devel openssl-devel mingw-w64-gcc
 
-  echo "[*] Setting up uv via mise..."
+  echo "[*] Setting up uv and vulnx via mise..."
   mise_user use -g --force uv@latest
+  mise_user use -g github:projectdiscovery/vulnx@latest
 
   echo "[*] Installing Python exploitation tools via uv..."
   local py_tools=(impacket responder certipy-ad mitm6 pwntools)
@@ -566,21 +583,17 @@ install_exploitation(){
   fi
 
   echo "[*] Installing Nix exploitation packages..."
-  local nix_pkgs=(metasploit cosign sliver-c2 bloodhound pretender evil-winrm)
+  local nix_pkgs=(metasploit cosign pretender evil-winrm)
 
   for pkg in "${nix_pkgs[@]}"; do
     echo " -> Installing $pkg..."
     nix_env_user -iA "nixpkgs.$pkg" || echo -e "\e[31m[!] Failed to install $pkg (skipping)\e[0m"
   done
 
-  echo "[*] Granting network capabilities to Pretender and Sliver..."
+  echo "[*] Granting network capabilities to Pretender..."
   local pretender_bin
   pretender_bin=$(readlink -f "$TARGET_HOME/.nix-profile/bin/pretender" 2>/dev/null)
-  [ -n "$pretender_bin" ] && sudo setcap 'cap_net_raw,cap_net_admin=+ep' "$pretender_bin"
-
-  local sliver_server_bin
-  sliver_server_bin=$(readlink -f "$TARGET_HOME/.nix-profile/bin/sliver-server" 2>/dev/null)
-  [ -n "$sliver_server_bin" ] && sudo setcap 'cap_net_bind_service=+ep' "$sliver_server_bin"
+  [ -f "$pretender_bin" ] && sudo setcap 'cap_net_raw,cap_net_admin=+ep' "$pretender_bin"
 
   echo "[*] Syncing SharpCollection..."
   if [ ! -d "$TARGET_HOME/Tools/SharpCollection/.git" ]; then
@@ -588,10 +601,6 @@ install_exploitation(){
   else
     (cd "$TARGET_HOME/Tools/SharpCollection" && as_user git pull)
   fi
-
-  local bashrc="$TARGET_HOME/.bashrc"
-  grep -q "alias bloodhound=" "$bashrc" 2>/dev/null || \
-    echo "alias bloodhound='bloodhound --no-sandbox'" >> "$bashrc"
 
   echo "Exploitation tools installation complete!"
 }
@@ -603,8 +612,7 @@ install_c2(){
   as_user mkdir -p "$TARGET_HOME/.local/bin" "$TARGET_HOME/Tools"
 
   install_adaptix
-
-  # install_sliver
+  install_sliver
   # install_mythic
   # install_cobaltstrike
 
@@ -615,57 +623,68 @@ install_web_testing(){
   echo "Installing web testing tools..."
 
   as_user mkdir -p "$TARGET_HOME/.local/bin" "$TARGET_HOME/.cargo/bin" "$TARGET_HOME/go/bin"
-
   sudo xbps-install -Su -y nikto sqlmap
 
+  echo "[*] Installing Python web tools via uv..."
   uv_user tool install --force git+https://github.com/s0md3v/XSStrike
+  uv_user tool install --force arjun
+
+  echo "[*] Setting up Go via mise..."
   mise_user use -g --force go@latest
 
+  echo "[*] Installing Go web tools..."
   as_user env GOPATH="$TARGET_HOME/go" go install github.com/ffuf/ffuf/v2@latest
   as_user env GOPATH="$TARGET_HOME/go" go install github.com/OJ/gobuster/v3@latest
   as_user env GOPATH="$TARGET_HOME/go" go install github.com/hahwul/dalfox/v3@latest
+  as_user env GOPATH="$TARGET_HOME/go" go install github.com/projectdiscovery/katana/cmd/katana@latest
+  as_user env GOPATH="$TARGET_HOME/go" go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest
 
+  echo "[*] Installing Rust web tools..."
   as_user cargo install --force feroxbuster
 
   [ "$(type -t install_burp)" = "function" ] && install_burp
   [ "$(type -t install_caido)" = "function" ] && install_caido
-
-  echo "[*] Configuring shell aliases in user's .bashrc..."
-  local bashrc="$TARGET_HOME/.bashrc"
-
-  grep -q "alias burpsuite=" "$bashrc" 2>/dev/null || \
-    echo "alias burpsuite='LD_LIBRARY_PATH=\$HOME/Tools/BurpSuite/lib burpsuite'" >> "$bashrc"
-
-  grep -q "alias caido=" "$bashrc" 2>/dev/null || \
-    echo "alias caido='caido --no-sandbox'" >> "$bashrc"
 
   echo "Web Testing installation complete!"
 }
 
 install_scripts(){
   echo "Installing scripts..."
-  local SCRIPT_DIR="$HOME/.local/share/scripts"
-  mkdir -p "$SCRIPT_DIR/linux" "$SCRIPT_DIR/windows" "$SCRIPT_DIR/wordlists"
-  curl -fsSL https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh \
+
+  local SCRIPT_DIR="$TARGET_HOME/.local/share/scripts"
+
+  as_user mkdir -p "$SCRIPT_DIR/linux" "$SCRIPT_DIR/windows" "$SCRIPT_DIR/wordlists"
+
+  echo "[*] Downloading Linux enumeration scripts..."
+  as_user curl -# -fsSL https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh \
     -o "$SCRIPT_DIR/linux/linpeas.sh"
-  curl -fsSL https://raw.githubusercontent.com/mzet-/linux-exploit-suggester/master/linux-exploit-suggester.sh \
+  as_user curl -# -fsSL https://raw.githubusercontent.com/mzet-/linux-exploit-suggester/master/linux-exploit-suggester.sh \
     -o "$SCRIPT_DIR/linux/les.sh"
-  chmod +x "$SCRIPT_DIR/linux/"*.sh
-  curl -fsSL https://github.com/peass-ng/PEASS-ng/releases/latest/download/winPEASany.exe \
+  as_user chmod +x "$SCRIPT_DIR/linux/linpeas.sh" "$SCRIPT_DIR/linux/les.sh"
+
+  echo "[*] Downloading Windows enumeration scripts..."
+  as_user curl -# -fsSL https://github.com/peass-ng/PEASS-ng/releases/latest/download/winPEASany.exe \
     -o "$SCRIPT_DIR/windows/winPEAS.exe"
-  curl -fsSL https://raw.githubusercontent.com/PowerShellMafia/PowerSploit/master/Recon/PowerView.ps1 \
+  as_user curl -# -fsSL https://raw.githubusercontent.com/PowerShellMafia/PowerSploit/master/Recon/PowerView.ps1 \
     -o "$SCRIPT_DIR/windows/PowerView.ps1"
-  if [ ! -d "$SCRIPT_DIR/wordlists/SecLists" ]; then
-    git clone --depth 1 https://github.com/danielmiessler/SecLists.git "$SCRIPT_DIR/wordlists/SecLists"
+
+  echo "[*] Cloning SecLists..."
+  if [ ! -d "$SCRIPT_DIR/wordlists/SecLists/.git" ]; then
+    as_user git clone --depth 1 https://github.com/danielmiessler/SecLists.git "$SCRIPT_DIR/wordlists/SecLists"
+  else
+    (cd "$SCRIPT_DIR/wordlists/SecLists" && as_user git pull)
   fi
-  sudo ln -sfn "$SCRIPT_DIR/wordlists" /usr/share/wordlists 2>/dev/null || echo "(!) Note: Manual sudo required to link /usr/share/wordlists"
+
+  echo "[*] Linking to /usr/share/wordlists..."
+  sudo mkdir -p /usr/share/wordlists
+  sudo ln -sfn "$SCRIPT_DIR/wordlists/SecLists" /usr/share/wordlists/SecLists 2>/dev/null || echo "(!) Note: Manual sudo required to link /usr/share/wordlists"
+
   echo "Scripts available in $SCRIPT_DIR..."
   echo "Done..."
 }
 
 install_reporting(){
   nix profile add nixpkgs#quarto
-
 }
 
 install_development(){
@@ -690,7 +709,6 @@ full_install() {
   echo " BUILD COMPLETE: Your system is live."
   echo "===================================================="
 }
-
 
 multi_install() {
   local funcs=(
@@ -826,12 +844,26 @@ multi_install() {
     "$fn"
   done
 
+  # Permanent path Injection
+  echo -e "\n\e[1;34m[*] Configuring permanent Master PATH in .bashrc...\e[0m"
+  local bashrc="$TARGET_HOME/.bashrc"
+
+  if ! grep -q "# --- SECURITY TOOLS PATH ---" "$bashrc" 2>/dev/null; then
+    cat << 'EOF' | sudo -u "$TARGET_USER" tee -a "$bashrc" > /dev/null
+
+# --- SECURITY TOOLS PATH ---
+export PATH="$HOME/.local/bin:$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$HOME/.local/share/mise/shims:$HOME/.cargo/bin:$HOME/go/bin:$PATH"
+EOF
+  fi
+  # --------------------------------
+
   echo -e "\n\e[1;32m[+] Selected installations completed successfully!\e[0m"
+  echo -e "\e[1;33m[!] IMPORTANT: Run 'source ~/.bashrc' or open a new terminal window to start using your new tools.\e[0m\n"
 }
 
 update_system() {
   echo "Syncing repositories and updating Void Linux..."
-  sudo xbps-install -Su -y
+  sudo xbps-install -Syu
 }
 
 test_function(){
@@ -858,14 +890,14 @@ uv_user() {
 nix_env_user() {
   as_user nix-env "$@"
 }
+
 trap 'tput cnorm' EXIT
 
 OPTIONS=(
   "1. Full setup"
   "2. Select And Install"
   "3. Update"
-  "4. Test"
-  "5. Exit"
+  "4. Exit"
 )
 
 
@@ -943,7 +975,7 @@ case $SELECTED in
   1)
     echo "  → Selection Install..."
     multi_install ;;
-  2) echo "  → Updating...";;
-  3) echo "  → Testing..." ;;
-  4) echo "  → Goodbye!"; exit 0;;
+  2) echo "  → Updating..."
+    update_system ;;
+  3) echo "  → Goodbye!"; exit 0;;
 esac
