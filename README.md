@@ -1,1 +1,1 @@
-Scripts for setting a security platform on Void linux.
+Scripts for setting a security testing system on Void Linux.
